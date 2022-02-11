@@ -10,10 +10,12 @@ from src.models.snn import SNN
 if __name__ == '__main__':
 	# Here we load the Dataset
 	root = os.path.expanduser("./data/datasets/torch/fashion-mnist")
-	train_dataset = torchvision.datasets.FashionMNIST(root, train=True, transform=None, target_transform=None,
-	                                                  download=True)
-	test_dataset = torchvision.datasets.FashionMNIST(root, train=False, transform=None, target_transform=None,
-	                                                 download=True)
+	train_dataset = torchvision.datasets.FashionMNIST(
+		root, train=True, transform=None, target_transform=None, download=True
+	)
+	test_dataset = torchvision.datasets.FashionMNIST(
+		root, train=False, transform=None, target_transform=None, download=True
+	)
 	# Standardize data
 	# x_train = torch.tensor(train_dataset.train_data, device=device, dtype=dtype)
 	x_train = np.array(train_dataset.data, dtype=float)
