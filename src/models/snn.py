@@ -7,6 +7,16 @@ from pythonbasictools.progress_bar import printProgressBar
 from torch import nn
 
 from src.models.spike_funcs import HeavisideSigmoidApprox
+import enum
+
+
+class ReadoutMth(enum.Enum):
+	RNN = 0
+
+
+class ForwardMth(enum.Enum):
+	LAYER_THEN_TIME = 0
+	TIME_THEN_LAYER = 1
 
 
 class SNN(torch.nn.Module):
@@ -17,11 +27,13 @@ class SNN(torch.nn.Module):
 			n_hidden_neurons=None,
 			use_recurrent_connection=True,
 			dt=1e-3,
-			int_time_steps=100,
+			int_time_steps=100,  # TODO: move to dataset
 			tau_syn=10e-3,
 			tau_mem=5e-3,
 			spike_func=HeavisideSigmoidApprox.apply,
 			device=None,
+			forward_mth=ForwardMth.LAYER_THEN_TIME,
+			readout_mth=ReadoutMth.RNN,
 	):
 		super(SNN, self).__init__()
 		self.input_size = inputs_size
@@ -37,13 +49,18 @@ class SNN(torch.nn.Module):
 		self.n_hidden_neurons = n_hidden_neurons if n_hidden_neurons is not None else []
 		self.forward_weights = []
 		if self.n_hidden_neurons:
-			self.forward_weights.append(torch.empty((inputs_size, self.n_hidden_neurons[0]), device=self.device, requires_grad=True))
+			self.forward_weights.append(
+				torch.empty((inputs_size, self.n_hidden_neurons[0]), device=self.device, requires_grad=True)
+			)
 			for i, hn in enumerate(self.n_hidden_neurons[:-1]):
-				self.forward_weights.append(torch.empty((hn, self.n_hidden_neurons[i + 1]), device=self.device, requires_grad=True))
-			# self.forward_weights.append(torch.empty((self.n_hidden_neurons[-1], output_size), device=self.device, requires_grad=True))
-			self.readout_weights = torch.empty((self.n_hidden_neurons[-1], output_size), device=self.device, requires_grad=True)
+				self.forward_weights.append(
+					torch.empty((hn, self.n_hidden_neurons[i + 1]), device=self.device, requires_grad=True)
+				)
+			self.readout_weights = torch.empty(
+				(self.n_hidden_neurons[-1], output_size),
+				device=self.device, requires_grad=True
+			)
 		else:
-			# self.forward_weights.append(torch.empty((inputs_size, output_size), device=self.device, requires_grad=True))
 			self.readout_weights = torch.empty((inputs_size, output_size), device=self.device, requires_grad=True)
 
 		self.use_recurrent_connection = use_recurrent_connection
@@ -51,8 +68,6 @@ class SNN(torch.nn.Module):
 		if use_recurrent_connection:
 			for i, hn in enumerate(self.n_hidden_neurons):
 				self.recurrent_weights.append(torch.empty((hn, hn), device=self.device, requires_grad=True))
-
-		# self.readout_weights = torch.empty((self.n_hidden_neurons[-1], output_size), device=self.device, requires_grad=True)
 
 		for layer in self.get_weights():
 			torch.nn.init.xavier_normal_(layer)
@@ -63,12 +78,28 @@ class SNN(torch.nn.Module):
 		self.beta = np.exp(-dt/tau_mem)
 		self.spike_func = spike_func
 
+		self.forward_func = self.get_forward_func(forward_mth)
+		self.readout_func = self.get_readout_func(readout_mth)
+
+	def get_readout_func(self, readout_mth: ReadoutMth):
+		readout_mth_to_func = {
+			ReadoutMth.RNN: self.forward_readout_rnn,
+		}
+		return readout_mth_to_func.get(readout_mth, ReadoutMth.RNN)
+
+	def get_forward_func(self, forward_mth: ForwardMth):
+		forward_mth_to_func = {
+			ForwardMth.LAYER_THEN_TIME: self.forward_layer_time,
+			ForwardMth.TIME_THEN_LAYER: self.forward_time_layer,
+		}
+		return forward_mth_to_func.get(forward_mth, ForwardMth.LAYER_THEN_TIME)
+
 	def get_weights(self):
 		return [*self.forward_weights, *self.recurrent_weights, self.readout_weights]
 
 	def forward(self, inputs):
-		spikes_records, membrane_potential_records = self.forward_layer_time(inputs)
-		output_records = self.forward_readout_rnn(inputs, spikes_records, membrane_potential_records)
+		spikes_records, membrane_potential_records = self.forward_func(inputs)
+		output_records = self.readout_func(inputs, spikes_records, membrane_potential_records)
 		return output_records, spikes_records, membrane_potential_records
 
 	def forward_layer_time(self, inputs):
@@ -79,16 +110,20 @@ class SNN(torch.nn.Module):
 		# Compute hidden layers activity
 		for ell, f_weights in enumerate(self.forward_weights):
 			h_ell = torch.einsum("btf, fo -> bto", (spikes_records[-1], f_weights))
+
 			forward_current = torch.zeros((batch_size, f_weights.shape[-1]), device=self.device, dtype=torch.float)
 			forward_potential = torch.zeros((batch_size, f_weights.shape[-1]), device=self.device, dtype=torch.float)
 			spikes = torch.zeros((batch_size, f_weights.shape[-1]), device=self.device, dtype=torch.float)
+
 			local_membrane_potential_records = []
 			local_spikes_records = []
+
 			for t in range(h_ell.shape[1]):
 				if self.use_recurrent_connection:
 					current_recurrent = torch.einsum("bo, of -> bf", (spikes, self.recurrent_weights[ell]))
 				else:
 					current_recurrent = 0.0
+
 				spikes = self.spike_func(forward_potential - 1.0)
 				is_active = 1.0 - spikes.detach()
 
