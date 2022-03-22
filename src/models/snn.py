@@ -2,10 +2,9 @@ import time
 
 import numpy as np
 import torch
-import tqdm
 from pythonbasictools.progress_bar import printProgressBar
 from torch import nn
-
+from torch.utils.data import DataLoader
 from src.models.spike_funcs import HeavisideSigmoidApprox
 import enum
 
@@ -27,7 +26,7 @@ class SNN(torch.nn.Module):
 			n_hidden_neurons=None,
 			use_recurrent_connection=True,
 			dt=1e-3,
-			int_time_steps=100,  # TODO: move to dataset
+			# int_time_steps=100,  # TODO: move to dataset
 			tau_syn=10e-3,
 			tau_mem=5e-3,
 			spike_func=HeavisideSigmoidApprox.apply,
@@ -72,7 +71,7 @@ class SNN(torch.nn.Module):
 		for layer in self.get_weights():
 			torch.nn.init.xavier_normal_(layer)
 
-		self.int_time_steps = int_time_steps
+		# self.int_time_steps = int_time_steps
 		self.dt = dt
 		self.alpha = np.exp(-dt/tau_syn)
 		self.beta = np.exp(-dt/tau_mem)
@@ -180,76 +179,75 @@ class SNN(torch.nn.Module):
 				out = self.spike_func(forward_membrane_potentials[ell])
 				spikes[ell] = out.detach()
 
-	def current2firing_time(self, x, tau=20.0, thr=0.2, tmax=1.0, epsilon=1e-7):
-		""" Computes first firing time latency for a current input x assuming the charge time of a current based LIF neuron.
-
-		Args:
-		x -- The "current" values
-
-		Keyword args:
-		tau -- The membrane time constant of the LIF neuron to be charged
-		thr -- The firing threshold value
-		tmax -- The maximum time returned
-		epsilon -- A generic (small) epsilon > 0
-
-		Returns:
-		Time to first spike for each "current" x
-		"""
-		idx = x < thr
-		x = np.clip(x, thr + epsilon, 1e9)
-		T = tau * np.log(x / (x - thr))
-		T[idx] = tmax
-		return T
-
-	def sparse_data_generator(self, X, y, batch_size, nb_steps, nb_units, shuffle=True):
-		""" This generator takes datasets in analog format and generates spiking network input as sparse tensors.
-
-		Args:
-			X: The data ( sample x event x 2 ) the last dim holds (time,neuron) tuples
-			y: The labels
-		"""
-
-		labels_ = np.array(y, dtype=np.int)
-		number_of_batches = len(X) // batch_size
-		sample_index = np.arange(len(X))
-
-		# compute discrete firing times
-		tau_eff = 20e-3 / self.dt
-		firing_times = np.array(self.current2firing_time(X, tau=tau_eff, tmax=nb_steps), dtype=int)
-		unit_numbers = np.arange(nb_units)
-
-		if shuffle:
-			np.random.shuffle(sample_index)
-
-		total_batch_count = 0
-		counter = 0
-		while counter < number_of_batches:
-			batch_index = sample_index[batch_size * counter:batch_size * (counter + 1)]
-
-			coo = [[] for i in range(3)]
-			for bc, idx in enumerate(batch_index):
-				c = firing_times[idx] < nb_steps
-				times, units = firing_times[idx][c], unit_numbers[c]
-
-				batch = [bc for _ in range(len(times))]
-				coo[0].extend(batch)
-				coo[1].extend(times)
-				coo[2].extend(units)
-
-			i = torch.LongTensor(coo).to(self.device)
-			v = torch.FloatTensor(np.ones(len(coo[0]))).to(self.device)
-
-			X_batch = torch.sparse.FloatTensor(i, v, torch.Size([batch_size, nb_steps, nb_units])).to(self.device)
-			y_batch = torch.tensor(labels_[batch_index], device=self.device)
-
-			yield X_batch.to(device=self.device), y_batch.to(device=self.device)
-
-			counter += 1
+	# def current2firing_time(self, x, tau=20.0, thr=0.2, tmax=1.0, epsilon=1e-7):
+	# 	""" Computes first firing time latency for a current input x assuming the charge time of a current based LIF neuron.
+	#
+	# 	Args:
+	# 	x -- The "current" values
+	#
+	# 	Keyword args:
+	# 	tau -- The membrane time constant of the LIF neuron to be charged
+	# 	thr -- The firing threshold value
+	# 	tmax -- The maximum time returned
+	# 	epsilon -- A generic (small) epsilon > 0
+	#
+	# 	Returns:
+	# 	Time to first spike for each "current" x
+	# 	"""
+	# 	idx = x < thr
+	# 	x = np.clip(x, thr + epsilon, 1e9)
+	# 	T = tau * np.log(x / (x - thr))
+	# 	T[idx] = tmax
+	# 	return T
+	#
+	# def sparse_data_generator(self, X, y, batch_size, nb_steps, nb_units, shuffle=True):
+	# 	""" This generator takes datasets in analog format and generates spiking network input as sparse tensors.
+	#
+	# 	Args:
+	# 		X: The data ( sample x event x 2 ) the last dim holds (time,neuron) tuples
+	# 		y: The labels
+	# 	"""
+	#
+	# 	labels_ = np.array(y, dtype=np.int)
+	# 	number_of_batches = len(X) // batch_size
+	# 	sample_index = np.arange(len(X))
+	#
+	# 	# compute discrete firing times
+	# 	tau_eff = 20e-3 / self.dt
+	# 	firing_times = np.array(self.current2firing_time(X, tau=tau_eff, tmax=nb_steps), dtype=int)
+	# 	unit_numbers = np.arange(nb_units)
+	#
+	# 	if shuffle:
+	# 		np.random.shuffle(sample_index)
+	#
+	# 	total_batch_count = 0
+	# 	counter = 0
+	# 	while counter < number_of_batches:
+	# 		batch_index = sample_index[batch_size * counter:batch_size * (counter + 1)]
+	#
+	# 		coo = [[] for i in range(3)]
+	# 		for bc, idx in enumerate(batch_index):
+	# 			c = firing_times[idx] < nb_steps
+	# 			times, units = firing_times[idx][c], unit_numbers[c]
+	#
+	# 			batch = [bc for _ in range(len(times))]
+	# 			coo[0].extend(batch)
+	# 			coo[1].extend(times)
+	# 			coo[2].extend(units)
+	#
+	# 		i = torch.LongTensor(coo).to(self.device)
+	# 		v = torch.FloatTensor(np.ones(len(coo[0]))).to(self.device)
+	#
+	# 		X_batch = torch.sparse.FloatTensor(i, v, torch.Size([batch_size, nb_steps, nb_units])).to(self.device)
+	# 		y_batch = torch.tensor(labels_[batch_index], device=self.device)
+	#
+	# 		yield X_batch.to(device=self.device), y_batch.to(device=self.device)
+	#
+	# 		counter += 1
 
 	def fit(
 			self,
-			x_data,
-			y_data,
+			data: DataLoader,
 			lr=1e-3,
 			nb_epochs=10,
 			batch_size=256,
@@ -267,14 +265,14 @@ class SNN(torch.nn.Module):
 		loss_history = []
 		for epoch in range(nb_epochs):
 			epoch_loss = []
-			for x_batch, y_batch in self.sparse_data_generator(x_data, y_data, batch_size, self.int_time_steps, self.input_size):
+			for x_batch, y_batch in data:
 				out, spikes, potential = self(x_batch.to_dense())
 				m, _ = torch.max(out, 1)
 				log_p_y = log_softmax_fn(m)
 
 				# Here we set up our regularizer loss
-				# The strength paramters here are merely a guess and there should be ample room for improvement by
-				# tuning these paramters.
+				# The strength parameters here are merely a guess and there should be ample room for improvement by
+				# tuning these parameters.
 				reg_loss = 1e-5 * sum([torch.sum(s) for s in spikes])  # L1 loss on total number of spikes
 				reg_loss += 1e-5 * sum([torch.mean(torch.sum(torch.sum(s, dim=0), dim=0) ** 2) for s in spikes])  # L2 loss on spikes per neuron
 
@@ -292,10 +290,10 @@ class SNN(torch.nn.Module):
 
 		return loss_history
 
-	def compute_classification_accuracy(self, x_data, y_data, batch_size=256):
+	def compute_classification_accuracy(self, data: DataLoader, batch_size=256):
 		""" Computes classification accuracy on supplied data in batches. """
 		accs = []
-		for x_local, y_local in self.sparse_data_generator(x_data, y_data, batch_size, self.int_time_steps, self.input_size, shuffle=False):
+		for x_local, y_local in data:
 			out, spikes, _ = self(x_local.to_dense())
 			m, _ = torch.max(out, 1)  # max over time
 			_, am = torch.max(m, 1)  # argmax over output units

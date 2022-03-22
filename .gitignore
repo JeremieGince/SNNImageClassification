@@ -268,3 +268,19 @@ pip-selfcheck.json
 
 # Ignore data folder
 [dD]ata
+src/datasets/src/datasets/mnist/MNIST/raw/train-labels-idx1-ubyte.gz
+src/datasets/src/datasets/mnist/MNIST/raw/train-labels-idx1-ubyte
+src/datasets/src/datasets/mnist/MNIST/raw/train-images-idx3-ubyte.gz
+src/datasets/src/datasets/mnist/MNIST/raw/train-images-idx3-ubyte
+src/datasets/src/datasets/mnist/MNIST/raw/t10k-labels-idx1-ubyte.gz
+src/datasets/src/datasets/mnist/MNIST/raw/t10k-labels-idx1-ubyte
+src/datasets/src/datasets/mnist/MNIST/raw/t10k-images-idx3-ubyte.gz
+src/datasets/src/datasets/mnist/MNIST/raw/t10k-images-idx3-ubyte
+src/datasets/mnist/MNIST/raw/train-labels-idx1-ubyte.gz
+src/datasets/mnist/MNIST/raw/train-labels-idx1-ubyte
+src/datasets/mnist/MNIST/raw/train-images-idx3-ubyte.gz
+src/datasets/mnist/MNIST/raw/train-images-idx3-ubyte
+src/datasets/mnist/MNIST/raw/t10k-labels-idx1-ubyte.gz
+src/datasets/mnist/MNIST/raw/t10k-labels-idx1-ubyte
+src/datasets/mnist/MNIST/raw/t10k-images-idx3-ubyte.gz
+src/datasets/mnist/MNIST/raw/t10k-images-idx3-ubyte
