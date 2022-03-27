@@ -5,7 +5,7 @@ import torch
 from pythonbasictools.progress_bar import printProgressBar
 from torch import nn
 from torch.utils.data import DataLoader
-from src.models.spike_funcs import HeavisideSigmoidApprox
+from src.modules.spike_funcs import HeavisideSigmoidApprox
 import enum
 
 
@@ -40,45 +40,66 @@ class SNN(torch.nn.Module):
 
 		self.device = device
 		if self.device is None:
-			if torch.cuda.is_available():
-				self.device = torch.device("cuda")
-			else:
-				self.device = torch.device("cpu")
+			self._set_default_device_()
 
 		self.n_hidden_neurons = n_hidden_neurons if n_hidden_neurons is not None else []
-		self.forward_weights = []
-		if self.n_hidden_neurons:
-			self.forward_weights.append(
-				torch.empty((inputs_size, self.n_hidden_neurons[0]), device=self.device, requires_grad=True)
-			)
-			for i, hn in enumerate(self.n_hidden_neurons[:-1]):
-				self.forward_weights.append(
-					torch.empty((hn, self.n_hidden_neurons[i + 1]), device=self.device, requires_grad=True)
-				)
-			self.readout_weights = torch.empty(
-				(self.n_hidden_neurons[-1], output_size),
-				device=self.device, requires_grad=True
-			)
-		else:
-			self.readout_weights = torch.empty((inputs_size, output_size), device=self.device, requires_grad=True)
-
 		self.use_recurrent_connection = use_recurrent_connection
-		self.recurrent_weights = []
-		if use_recurrent_connection:
-			for i, hn in enumerate(self.n_hidden_neurons):
-				self.recurrent_weights.append(torch.empty((hn, hn), device=self.device, requires_grad=True))
+		self.forward_weights = nn.ParameterList()
+		self.recurrent_weights = nn.ParameterList()
+		self.readout_weights = nn.Parameter()
+		self._populate_forward_weights_()
+		self._populate_recurrent_weights_()
+		self._populate_readout_weights_()
+		self.initialize_weights_()
 
-		for layer in self.get_weights():
-			torch.nn.init.xavier_normal_(layer)
-
-		# self.int_time_steps = int_time_steps
 		self.dt = dt
-		self.alpha = np.exp(-dt/tau_syn)
-		self.beta = np.exp(-dt/tau_mem)
+		self.alpha = np.exp(-dt / tau_syn)
+		self.beta = np.exp(-dt / tau_mem)
 		self.spike_func = spike_func
 
 		self.forward_func = self.get_forward_func(forward_mth)
 		self.readout_func = self.get_readout_func(readout_mth)
+
+	def _set_default_device_(self):
+		self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+
+	def _populate_forward_weights_(self):
+		self.forward_weights = torch.nn.ParameterList()
+		if not self.n_hidden_neurons:
+			return
+		self.forward_weights.append(
+			nn.Parameter(
+				torch.empty((self.inputs_size, self.n_hidden_neurons[0]), device=self.device),
+				requires_grad=True
+			)
+		)
+		for i, hn in enumerate(self.n_hidden_neurons[:-1]):
+			self.forward_weights.append(
+				nn.Parameter(torch.empty((hn, self.n_hidden_neurons[i + 1]), device=self.device), requires_grad=True)
+			)
+
+	def _populate_readout_weights_(self):
+		if self.n_hidden_neurons:
+			self.readout_weights = nn.Parameter(
+				torch.empty((self.n_hidden_neurons[-1], self.output_size), device=self.device),
+				requires_grad=True
+			)
+		else:
+			self.readout_weights = nn.Parameter(
+				torch.empty((self.inputs_size, self.output_size), device=self.device),
+				requires_grad=True
+			)
+
+	def _populate_recurrent_weights_(self):
+		self.recurrent_weights = nn.ParameterList()
+		if not self.use_recurrent_connection:
+			return
+		for i, hn in enumerate(self.n_hidden_neurons):
+			self.recurrent_weights.append(nn.Parameter(torch.empty((hn, hn), device=self.device), requires_grad=True))
+
+	def initialize_weights_(self):
+		for param in self.parameters():
+			torch.nn.init.xavier_normal_(param)
 
 	def get_readout_func(self, readout_mth: ReadoutMth):
 		readout_mth_to_func = {

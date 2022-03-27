@@ -4,7 +4,7 @@ import numpy as np
 import torchvision
 import matplotlib.pyplot as plt
 import seaborn as sns
-from src.models.snn import SNN
+from src.modules.snn import SNN
 
 
 if __name__ == '__main__':
