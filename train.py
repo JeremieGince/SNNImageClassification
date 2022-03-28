@@ -20,7 +20,7 @@ def norm_255(x):
 	return x / 255.0
 
 
-def get_dataloaders(dataset_name, batch_size=64):
+def get_dataloaders(dataset_name, batch_size=64, as_timeseries: bool = False):
 	transforms = Compose([
 		ToTensor(),
 		Lambda(norm_255),
@@ -28,14 +28,9 @@ def get_dataloaders(dataset_name, batch_size=64):
 	])
 	if dataset_name.lower() == "mnist":
 		root = os.path.expanduser("./data/datasets/torch/mnist")
-		mnist_train = MNIST(root, train=True, download=True, transform=transforms)
-		mnist_test = MNIST(root, train=False, download=True, transform=transforms)
-		train_dataloader = dataset_to_timeseries(
-			mnist_train, batch_size=batch_size, nb_steps=100, tau_mem=20.0, shuffle=True
-		)
-		test_dataloader = dataset_to_timeseries(
-			mnist_test, batch_size=batch_size, nb_steps=100, tau_mem=20.0, shuffle=False
-		)
+		train_dataset = MNIST(root, train=True, download=True, transform=transforms)
+		test_dataset = MNIST(root, train=False, download=True, transform=transforms)
+		
 	elif dataset_name.lower() == "fashion_mnist":
 		root = os.path.expanduser("./data/datasets/torch/fashion-mnist")
 		train_dataset = torchvision.datasets.FashionMNIST(
@@ -44,14 +39,24 @@ def get_dataloaders(dataset_name, batch_size=64):
 		test_dataset = torchvision.datasets.FashionMNIST(
 			root, train=False, transform=transforms, target_transform=None, download=True
 		)
+	else:
+		raise ValueError()
+
+	if as_timeseries:
+		train_dataloader = dataset_to_timeseries(
+			train_dataset, batch_size=batch_size, nb_steps=100, tau_mem=20.0, shuffle=True
+		)
+		test_dataloader = dataset_to_timeseries(
+			test_dataset, batch_size=batch_size, nb_steps=100, tau_mem=20.0, shuffle=False
+		)
+	else:
 		train_dataloader = DataLoader(
 			train_dataset, batch_size=batch_size, shuffle=True, num_workers=psutil.cpu_count(logical=False)
 		)
 		test_dataloader = DataLoader(
 			test_dataset, batch_size=batch_size, shuffle=False, num_workers=psutil.cpu_count(logical=False)
 		)
-	else:
-		raise ValueError()
+
 	return dict(train=train_dataloader, test=test_dataloader)
 
 
