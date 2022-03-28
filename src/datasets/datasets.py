@@ -115,7 +115,13 @@ def timeseries_dataloader_generator(
 	# 	counter += 1
 
 
-def dataset_to_timeseries(dataset, batch_size: int, nb_steps: int, tau_mem: float = 20e-3, shuffle=True):
+def dataset_to_timeseries(dataset: Dataset, batch_size: int, nb_steps: int, tau_mem: float = 20e-3, shuffle=True):
+	dataset.transform = transforms.Compose(
+		[
+			dataset.transform,
+			np.array
+		]
+	)
 	list_value_label = [dataset[i] for i in range(len(dataset))]
 	values, labels = list(zip(*list_value_label))
 	return timeseries_dataloader_generator(np.array(values, dtype=float), np.array(labels), batch_size, nb_steps, tau_mem, shuffle)
@@ -128,12 +134,13 @@ if __name__ == '__main__':
 			transforms.Lambda(lambda a: a/255)
 		]
 	)
-	mnist_train = MNIST('src/datasets/mnist', train=True, download=True, transform=transform)
+	mnist_train = MNIST('./mnist', train=True, download=True, transform=transform)
 	# mnist_test = MNIST('src/datasets/mnist', train=False, download=True, transform=transform)
 	dataloader = dataset_to_timeseries(mnist_train, batch_size=60, nb_steps=100, tau_mem=20.0, shuffle=True)
 	train_features, train_labels = next(iter(dataloader))
-	print(f"Feature batch shape: {train_features.size()}")
-	print(f"Labels batch shape: {train_labels.size()}")
+	print(type(train_features))
+	# print(f"Feature batch shape: {train_features.size()}")
+	# print(f"Labels batch shape: {train_labels.size()}")
 	# data_train = torch.utils.data.DataLoader(
 	# 	MNIST(
 	# 		'src/datasets/mnist', train=True, download=True,
