@@ -3,7 +3,6 @@ import os
 
 import matplotlib.pyplot as plt
 import psutil
-import seaborn as sns
 import torch
 import torchvision
 from pythonbasictools.device import log_pytorch_device_setup
@@ -13,14 +12,23 @@ from torchvision.datasets import MNIST
 from torchvision.transforms import Compose, Lambda, ToTensor
 
 from src.datasets.datasets import dataset_to_timeseries
-from src.modules.snn_v2 import LoadCheckpointMode, SNN
+from src.modules.snn import ForwardMth
+from src.modules.snn import LoadCheckpointMode, SNN
+from torchviz import make_dot
+
+from src.modules.spiking_layers import DynamicType
 
 
 def norm_255(x):
 	return x / 255.0
 
 
-def get_dataloaders(dataset_name, batch_size=64, as_timeseries: bool = False):
+def get_dataloaders(
+		dataset_name,
+		batch_size=64,
+		as_timeseries: bool = False,
+		nb_workers: int = 0,
+):
 	transforms = Compose([
 		ToTensor(),
 		Lambda(norm_255),
@@ -30,7 +38,7 @@ def get_dataloaders(dataset_name, batch_size=64, as_timeseries: bool = False):
 		root = os.path.expanduser("./data/datasets/torch/mnist")
 		train_dataset = MNIST(root, train=True, download=True, transform=transforms)
 		test_dataset = MNIST(root, train=False, download=True, transform=transforms)
-		
+
 	elif dataset_name.lower() == "fashion_mnist":
 		root = os.path.expanduser("./data/datasets/torch/fashion-mnist")
 		train_dataset = torchvision.datasets.FashionMNIST(
@@ -51,10 +59,10 @@ def get_dataloaders(dataset_name, batch_size=64, as_timeseries: bool = False):
 		)
 	else:
 		train_dataloader = DataLoader(
-			train_dataset, batch_size=batch_size, shuffle=True, num_workers=psutil.cpu_count(logical=False)
+			train_dataset, batch_size=batch_size, shuffle=True, num_workers=nb_workers
 		)
 		test_dataloader = DataLoader(
-			test_dataset, batch_size=batch_size, shuffle=False, num_workers=psutil.cpu_count(logical=False)
+			test_dataset, batch_size=batch_size, shuffle=False, num_workers=nb_workers
 		)
 
 	return dict(train=train_dataloader, test=test_dataloader)
@@ -64,19 +72,34 @@ if __name__ == '__main__':
 	logs_file_setup(__file__)
 	log_pytorch_device_setup()
 
-	d_name = "mnist"
-	logging.info(f"Dataset: {d_name}")
-	dataloaders = get_dataloaders(d_name, batch_size=64)
+	ts = False
+	d_name = f"mnist"
+	logging.info(f"Dataset: {d_name}{'-ts' if ts else ''}")
+	dataloaders = get_dataloaders(d_name, batch_size=256, as_timeseries=ts)
 
 	snn = SNN(
 		inputs_size=28 * 28,
 		output_size=10,
 		n_hidden_neurons=[100, ],
 		int_time_steps=100,
-		dt=1e-2,
-		checkpoint_folder=f"checkpoints-{d_name}"
+		dt=1e-3,
+		checkpoint_folder=f"checkpoints-{d_name}{'-ts' if ts else ''}-lt-bellec",
+		forward_mth=ForwardMth.TIME_THEN_LAYER,
+		dynamicType=DynamicType.Bellec,
 	)
-	loss_hist = snn.fit(dataloaders["train"], lr=1e-2, nb_epochs=5, load_checkpoint_mode=LoadCheckpointMode.LAST_EPOCH)
+	# x_viz, _ = next(iter(dataloaders["train"]))
+	# out_viz, _ = snn(x_viz.to(snn.device))
+	# print(make_dot(out_viz).render("figures/snn_torchviz", format="png"))
+	# snn.to_onnx()
+	loss_hist = snn.fit(
+		dataloaders["train"],
+		lr=1e-3,
+		nb_epochs=100,
+		load_checkpoint_mode=LoadCheckpointMode.LAST_EPOCH,
+		force_overwrite=True,
+		# optimizer=torch.optim.SGD(snn.parameters(), lr=1e-3, nesterov=True, momentum=0.9)
+	)
+	snn.load_checkpoint(LoadCheckpointMode.BEST_EPOCH)
 
 	train_acc = snn.compute_classification_accuracy(dataloaders["train"])
 	test_acc = snn.compute_classification_accuracy(dataloaders["test"])
@@ -87,5 +110,7 @@ if __name__ == '__main__':
 	plt.plot(loss_hist)
 	plt.xlabel("Epoch")
 	plt.ylabel("Loss")
-	sns.despine()
+	# sns.despine()
 	plt.show()
+
+
