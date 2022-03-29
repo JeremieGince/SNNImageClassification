@@ -16,7 +16,7 @@ class TimeSeriesMNISTDataset(Dataset):
 		return len(self.timeseries_labels)
 
 	def __getitem__(self, idx):
-		timeseries = self.timeseries_arrays[idx, :, :]
+		timeseries = self.timeseries_arrays[idx]
 		label = self.timeseries_labels[idx]
 		if self.transform:
 			timeseries = self.transform(timeseries)
@@ -25,10 +25,73 @@ class TimeSeriesMNISTDataset(Dataset):
 		return timeseries, label
 
 
+def current_to_timeseries(
+		X,
+		n_steps: int,
+		t_max: float,
+		tau=20.0,
+		thr=0.2,  # todo trouver une méthode pour calculer le threshold ex moyenne des pixels
+		epsilon=1e-7
+):
+	"""
+	Computes first firing time latency for a current input x assuming the charge time of a current based LIF neuron.
+
+	:param X: Current value
+	:param tau: The membrane time constant of the LIF neuron to be charged
+	:param thr: The firing threshold value
+	:param n_steps: The number of time step
+	:param t_max:
+	:param epsilon: A generic (small) epsilon > 0
+	:return: Time to first spike for each "current" x
+	"""
+	t_per_step = t_max/n_steps
+	spikes = np.zeros((X.shape[0], n_steps), dtype=int)
+	X = np.clip(X, thr + epsilon, 1e9)
+	T = tau * np.log(X / (X - thr))
+	indices = T // t_per_step
+	for index, i in enumerate(indices):
+		all_indices = np.arange(i, n_steps, step=i)
+		spikes[index, all_indices] = 1
+	return spikes
+
+
+def timeseries_dataloader_generator(
+		X,
+		y,
+		batch_size: int,
+		n_steps: int,
+		time_per_step: float,
+		thr: float,
+		tau_mem: float = 20,
+		shuffle=True
+):
+	"""
+	This generator takes datasets in analog format and generates spiking network input as sparse tensors.
+
+	:param thr:
+	:param X: The data ( sample x event x 2 ) the last dim holds (time,neuron) tuples
+	:param y: Data labels
+	:param batch_size:
+	:param n_steps:
+	:param time_per_step:
+	:param tau_mem:
+	:param shuffle:
+	:return:
+	"""
+
+	labels_ = np.array(y)
+	firing_times = current_to_timeseries(X, n_steps, time_per_step, tau_mem, thr)  #, dtype=int)
+	dataset = TimeSeriesMNISTDataset(firing_times, labels_, transform=transforms.ToTensor())
+	return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+
+
+########################################################################################################################
+
+
 def current2firing_time(
 		X,
 		tau=20.0,
-		thr=0.2,#todo trouver une méthode pour calculer le threshold ex moyenne des pixels
+		thr=0.2,  # todo trouver une méthode pour calculer le threshold ex moyenne des pixels
 		tmax=1.0,
 		epsilon=1e-7
 ):
@@ -52,7 +115,7 @@ def current2firing_time(
 	return T
 
 
-def timeseries_dataloader_generator(
+def sparse_dataloader_gen(
 		X,
 		y,
 		batch_size: int,
@@ -83,7 +146,7 @@ def timeseries_dataloader_generator(
 	# sample_index = np.arange(len(X))
 	# compute discrete firing times
 	# tau_eff = tau_mem / time_per_step
-	firing_times = current2firing_time(X, tau=tau_mem, tmax=nb_steps)#, dtype=int)
+	firing_times = current2firing_time(X, tau=tau_mem, tmax=nb_steps)  #, dtype=int)
 	dataset = TimeSeriesMNISTDataset(firing_times, labels_, transform=transforms.ToTensor())
 	return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 	# unit_numbers = np.arange(nb_units)
@@ -124,7 +187,7 @@ def dataset_to_timeseries(dataset: Dataset, batch_size: int, nb_steps: int, tau_
 	)
 	list_value_label = [dataset[i] for i in range(len(dataset))]
 	values, labels = list(zip(*list_value_label))
-	return timeseries_dataloader_generator(np.array(values, dtype=float), np.array(labels), batch_size, nb_steps, tau_mem, shuffle)
+	return sparse_dataloader_gen(np.array(values, dtype=float), np.array(labels), batch_size, nb_steps, tau_mem, shuffle)
 
 
 if __name__ == '__main__':
