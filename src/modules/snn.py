@@ -1,12 +1,22 @@
+import enum
+import json
+import logging
+import os
+import shutil
 import time
+from copy import deepcopy
+from typing import Dict, Iterable, Union
 
 import numpy as np
+import psutil
 import torch
 from pythonbasictools.progress_bar import printProgressBar
 from torch import nn
 from torch.utils.data import DataLoader
+
 from src.modules.spike_funcs import HeavisideSigmoidApprox
-import enum
+from src.modules.spiking_layers import DynamicType, LIFLayer, ReadoutLayer
+from src.modules.utils import mapping_update_recursively
 
 
 class ReadoutMth(enum.Enum):
@@ -18,307 +28,419 @@ class ForwardMth(enum.Enum):
 	TIME_THEN_LAYER = 1
 
 
+class LoadCheckpointMode(enum.Enum):
+	BEST_EPOCH = enum.auto()
+	LAST_EPOCH = enum.auto()
+
+
 class SNN(torch.nn.Module):
+	SAVE_EXT = '.pth'
+	SUFFIX_SEP = '-'
+	CHECKPOINTS_META_SUFFIX = 'checkpoints'
+	CHECKPOINT_SAVE_PATH_KEY = "save_path"
+	CHECKPOINT_BEST_KEY = "best"
+	CHECKPOINT_EPOCHS_KEY = "epochs"
+	CHECKPOINT_EPOCH_KEY = "epoch"
+	CHECKPOINT_LOSS_KEY = 'loss'
+	CHECKPOINT_OPTIMIZER_STATE_DICT_KEY = "optimizer_state_dict"
+	CHECKPOINT_STATE_DICT_KEY = "model_state_dict"
+	CHECKPOINT_FILE_STRUCT: Dict[str, Union[str, Dict[int, str]]] = {
+		CHECKPOINT_BEST_KEY: CHECKPOINT_SAVE_PATH_KEY,
+		CHECKPOINT_EPOCHS_KEY: {0: CHECKPOINT_SAVE_PATH_KEY},
+	}
+	load_mode_to_suffix = {mode: mode.name for mode in list(LoadCheckpointMode)}
+
 	def __init__(
 			self,
 			inputs_size: int,
 			output_size: int,
-			n_hidden_neurons=None,
-			use_recurrent_connection=True,
+			n_hidden_neurons: Iterable[int] = None,
+			use_recurrent_connection: Union[bool, Iterable[bool]] = True,
 			dt=1e-3,
-			# int_time_steps=100,  # TODO: move to dataset
-			tau_syn=10e-3,
-			tau_mem=5e-3,
-			spike_func=HeavisideSigmoidApprox.apply,
-			device=None,
+			int_time_steps=1_000,
+			spike_func: torch.autograd.Function = HeavisideSigmoidApprox,
 			forward_mth=ForwardMth.LAYER_THEN_TIME,
-			readout_mth=ReadoutMth.RNN,
+			device=None,
+			checkpoint_folder: str = "checkpoints",
+			model_name: str = "snn",
+			dynamicType: DynamicType = DynamicType.Emre,
+			**kwargs
 	):
 		super(SNN, self).__init__()
 		self.input_size = inputs_size
 		self.output_size = output_size
+		self.dynamicType = dynamicType
+		self.kwargs = kwargs
 
 		self.device = device
 		if self.device is None:
 			self._set_default_device_()
 
-		self.n_hidden_neurons = n_hidden_neurons if n_hidden_neurons is not None else []
-		self.use_recurrent_connection = use_recurrent_connection
-		self.forward_weights = nn.ParameterList()
-		self.recurrent_weights = nn.ParameterList()
-		self.readout_weights = nn.Parameter()
-		self._populate_forward_weights_()
-		self._populate_recurrent_weights_()
-		self._populate_readout_weights_()
-		self.initialize_weights_()
-
 		self.dt = dt
-		self.alpha = np.exp(-dt / tau_syn)
-		self.beta = np.exp(-dt / tau_mem)
+		self.int_time_steps = int_time_steps
 		self.spike_func = spike_func
 
+		self.checkpoint_folder = checkpoint_folder
+		self.model_name = model_name
+
+		self.n_hidden_neurons = n_hidden_neurons if n_hidden_neurons is not None else []
+		self.use_recurrent_connection = use_recurrent_connection
+		self.layers = nn.ModuleDict()
+		self._add_layers_()
+		self.initialize_weights_()
+		self.forward_mth = forward_mth
 		self.forward_func = self.get_forward_func(forward_mth)
-		self.readout_func = self.get_readout_func(readout_mth)
+
+	@property
+	def checkpoints_meta_path(self) -> str:
+		return f"{self.checkpoint_folder}/{self.model_name}{SNN.SUFFIX_SEP}{SNN.CHECKPOINTS_META_SUFFIX}.json"
+
+	def get_forward_func(self, forward_mth: ForwardMth):
+		forward_mth_to_func = {
+			ForwardMth.LAYER_THEN_TIME: self.forward_layer_then_time,
+			ForwardMth.TIME_THEN_LAYER: self.forward_time_then_layer,
+		}
+		return forward_mth_to_func.get(forward_mth, ForwardMth.LAYER_THEN_TIME)
 
 	def _set_default_device_(self):
 		self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
-	def _populate_forward_weights_(self):
-		self.forward_weights = torch.nn.ParameterList()
+	def _add_input_layer_(self):
 		if not self.n_hidden_neurons:
 			return
-		self.forward_weights.append(
-			nn.Parameter(
-				torch.empty((self.inputs_size, self.n_hidden_neurons[0]), device=self.device),
-				requires_grad=True
-			)
+		self.layers["input"] = LIFLayer(
+			input_size=self.input_size,
+			output_size=self.n_hidden_neurons[0],
+			use_recurrent_connection=self.use_recurrent_connection,
+			dt=self.dt,
+			spike_func=self.spike_func,
+			device=self.device,
+			dynamicType=self.dynamicType,
+			**self.kwargs
 		)
-		for i, hn in enumerate(self.n_hidden_neurons[:-1]):
-			self.forward_weights.append(
-				nn.Parameter(torch.empty((hn, self.n_hidden_neurons[i + 1]), device=self.device), requires_grad=True)
-			)
 
-	def _populate_readout_weights_(self):
-		if self.n_hidden_neurons:
-			self.readout_weights = nn.Parameter(
-				torch.empty((self.n_hidden_neurons[-1], self.output_size), device=self.device),
-				requires_grad=True
-			)
-		else:
-			self.readout_weights = nn.Parameter(
-				torch.empty((self.inputs_size, self.output_size), device=self.device),
-				requires_grad=True
-			)
-
-	def _populate_recurrent_weights_(self):
-		self.recurrent_weights = nn.ParameterList()
-		if not self.use_recurrent_connection:
+	def _add_hidden_layers_(self):
+		if not self.n_hidden_neurons:
 			return
-		for i, hn in enumerate(self.n_hidden_neurons):
-			self.recurrent_weights.append(nn.Parameter(torch.empty((hn, hn), device=self.device), requires_grad=True))
+		for i, hn in enumerate(self.n_hidden_neurons[:-1]):
+			self.layers[f"hidden_{i}"] = LIFLayer(
+				input_size=hn,
+				output_size=self.n_hidden_neurons[i + 1],
+				use_recurrent_connection=self.use_recurrent_connection,
+				dt=self.dt,
+				spike_func=self.spike_func,
+				device=self.device,
+				dynamicType=self.dynamicType,
+				**self.kwargs
+			)
+
+	def _add_readout_layer(self):
+		if self.n_hidden_neurons:
+			in_size = self.n_hidden_neurons[-1]
+		else:
+			in_size = self.input_size
+		self.layers["readout"] = ReadoutLayer(
+			input_size=in_size,
+			output_size=self.output_size,
+			dt=self.dt,
+			spike_func=self.spike_func,
+			dynamicType=self.dynamicType,
+			device=self.device,
+			**self.kwargs
+		)
+
+	def _add_layers_(self):
+		self._add_input_layer_()
+		self._add_hidden_layers_()
+		self._add_readout_layer()
 
 	def initialize_weights_(self):
 		for param in self.parameters():
-			torch.nn.init.xavier_normal_(param)
+			if param.ndim > 2:
+				torch.nn.init.xavier_normal_(param)
+			else:
+				torch.nn.init.normal_(param)
+		for layer_name, layer in self.layers.items():
+			if getattr(layer, "initialize_weights_") and callable(layer.initialize_weights_):
+				layer.initialize_weights_()
 
-	def get_readout_func(self, readout_mth: ReadoutMth):
-		readout_mth_to_func = {
-			ReadoutMth.RNN: self.forward_readout_rnn,
+	def _format_inputs(self, inputs: torch.Tensor) -> torch.Tensor:
+		"""
+		Check the shape of the inputs. If the shape of the inputs is (batch_size, features),
+		the inputs is considered constant over time and the inputs will be repeat over self.int_time_steps time steps.
+		If the shape of the inputs is (batch_size, time_steps, features), time_steps must be less are equal to
+		self.int_time_steps and the inputs will be padded by zeros for time steps greater than time_steps.
+		:param inputs: Inputs tensor
+		:return: Formatted Input tensor.
+		"""
+		with torch.no_grad():
+			if inputs.ndim == 2:
+				inputs = torch.unsqueeze(inputs, 1)
+				inputs = inputs.repeat(1, self.int_time_steps, 1)
+			assert inputs.ndim == 3, \
+				"shape of inputs must be (batch_size, time_steps, nb_features) or (batch_size, nb_features)"
+
+			t_diff = self.int_time_steps - inputs.shape[1]
+			assert t_diff >= 0, "inputs time steps must me less or equal to int_time_steps"
+			if t_diff > 0:
+				zero_inputs = torch.zeros((inputs.shape[0], t_diff, inputs.shape[-1]), device=self.device)
+				inputs = torch.cat([inputs, zero_inputs], dim=1)
+		return inputs
+
+	def forward_layer_then_time(self, inputs):
+		inputs = self._format_inputs(inputs)
+		layer_names = [layer_name for layer_name, _ in self.layers.items()]
+		hidden_states = {
+			layer_name: [None for t in range(self.int_time_steps)]
+			for layer_name, _ in self.layers.items()
 		}
-		return readout_mth_to_func.get(readout_mth, ReadoutMth.RNN)
-
-	def get_forward_func(self, forward_mth: ForwardMth):
-		forward_mth_to_func = {
-			ForwardMth.LAYER_THEN_TIME: self.forward_layer_time,
-			ForwardMth.TIME_THEN_LAYER: self.forward_time_layer,
+		hidden_outputs = {
+			layer_name: [None for t in range(self.int_time_steps)]
+			for layer_name, _ in self.layers.items()
 		}
-		return forward_mth_to_func.get(forward_mth, ForwardMth.LAYER_THEN_TIME)
+		outputs_trace = torch.zeros((inputs.shape[0], self.int_time_steps, self.output_size), device=self.device)
 
-	def get_weights(self):
-		return [*self.forward_weights, *self.recurrent_weights, self.readout_weights]
+		for layer_idx, (layer_name, layer) in enumerate(self.layers.items()):
+			if layer_idx == 0:
+				for t in range(self.int_time_steps):
+					hidden_outputs[layer_name][t], hidden_states[layer_name][t] = layer(inputs[:, t], None)
+			elif len(self.layers)-1 > layer_idx > 0:
+				for t in range(self.int_time_steps):
+					forward_tensor = hidden_outputs[layer_names[layer_idx-1]][t]
+					hh = hidden_states[layer_name][t - 1]
+					hidden_outputs[layer_name][t], hidden_states[layer_name][t] = layer(forward_tensor, hh)
+			else:
+				for t in range(self.int_time_steps):
+					forward_tensor = hidden_outputs[layer_names[layer_idx-1]][t]
+					hh = hidden_states[layer_name][t - 1]
+					outputs_trace[:, t], hidden_states[layer_name][t] = layer(forward_tensor, hh)
 
-	def forward(self, inputs):
-		spikes_records, membrane_potential_records = self.forward_func(inputs)
-		output_records = self.readout_func(inputs, spikes_records, membrane_potential_records)
-		return output_records, spikes_records, membrane_potential_records
+		return outputs_trace, hidden_states
 
-	def forward_layer_time(self, inputs):
-		membrane_potential_records = []
-		spikes_records = [inputs, ]
-		batch_size, nb_time_steps, nb_features = inputs.shape
-
-		# Compute hidden layers activity
-		for ell, f_weights in enumerate(self.forward_weights):
-			h_ell = torch.einsum("btf, fo -> bto", (spikes_records[-1], f_weights))
-
-			forward_current = torch.zeros((batch_size, f_weights.shape[-1]), device=self.device, dtype=torch.float)
-			forward_potential = torch.zeros((batch_size, f_weights.shape[-1]), device=self.device, dtype=torch.float)
-			spikes = torch.zeros((batch_size, f_weights.shape[-1]), device=self.device, dtype=torch.float)
-
-			local_membrane_potential_records = []
-			local_spikes_records = []
-
-			for t in range(h_ell.shape[1]):
-				if self.use_recurrent_connection:
-					current_recurrent = torch.einsum("bo, of -> bf", (spikes, self.recurrent_weights[ell]))
-				else:
-					current_recurrent = 0.0
-
-				spikes = self.spike_func(forward_potential - 1.0)
-				is_active = 1.0 - spikes.detach()
-
-				forward_current = self.alpha * forward_current + h_ell[:, t] + current_recurrent
-				forward_potential = (self.beta * forward_potential + forward_current) * is_active
-
-				local_membrane_potential_records.append(forward_potential)
-				local_spikes_records.append(spikes)
-
-			membrane_potential_records.append(torch.stack(local_membrane_potential_records, dim=1))
-			spikes_records.append(torch.stack(local_spikes_records, dim=1))
-
-		return spikes_records[1:], membrane_potential_records
-
-	def forward_readout_rnn(self, inputs, spikes_records=None, membrane_potential_records=None):
-		batch_size, nb_time_steps, nb_features = inputs.shape
-
-		h_out = torch.einsum("btf, fo -> bto", (spikes_records[-1], self.readout_weights))
-		forward_current = torch.zeros((batch_size, self.output_size), device=self.device, dtype=torch.float)
-		forward_potential = torch.zeros((batch_size, self.output_size), device=self.device, dtype=torch.float)
-		output_records = [forward_potential, ]
-
-		for t in range(h_out.shape[1]):
-			forward_current = self.alpha * forward_current + h_out[:, t]
-			forward_potential = (self.beta * forward_potential + forward_current)
-			output_records.append(forward_potential)
-
-		return torch.stack(output_records, dim=1)
-
-	def forward_time_layer(self, inputs):
-		membrane_potential_records = []
-		spikes_records = []
-		batch_size, input_size = inputs.shape
-
-		forward_synaptic_currents = [
-			torch.zeros((batch_size, f_weights.shape[0]), device=self.device, dtype=torch.float)
-			for i, f_weights in enumerate(self.forward_weights)
-		]
-		forward_membrane_potentials = [
-			torch.zeros((batch_size, f_weights.shape[0]), device=self.device, dtype=torch.float)
-			for i, f_weights in enumerate(self.forward_weights)
-		]
-		spikes = [
-			torch.zeros((batch_size, f_weights.shape[0]), device=self.device, dtype=torch.float)
-			for i, f_weights in enumerate(self.forward_weights)
-		]
-		spikes[0] = inputs
+	def forward_time_then_layer(self, inputs):
+		inputs = self._format_inputs(inputs)
+		hidden_states = {
+			layer_name: [None for t in range(self.int_time_steps)]
+			for layer_name, _ in self.layers.items()
+		}
+		outputs_trace = torch.zeros((inputs.shape[0], self.int_time_steps, self.output_size), device=self.device)
 
 		for t in range(self.int_time_steps):
-			for ell, f_weights in enumerate(self.forward_weights):
-				h_ell = torch.dot(spikes[ell], f_weights)
-				forward_synaptic_currents[ell] = self.alpha * forward_membrane_potentials[ell] + h_ell
-				forward_membrane_potentials[ell] = self.beta * forward_membrane_potentials[ell] + forward_synaptic_currents[ell]
-				out = self.spike_func(forward_membrane_potentials[ell])
-				spikes[ell] = out.detach()
+			forward_tensor = inputs[:, t]
+			for layer_idx, (layer_name, layer) in enumerate(self.layers.items()):
+				hh = hidden_states[layer_name][t - 1] if t > 0 else None
+				forward_tensor, hidden_states[layer_name][t] = layer(forward_tensor, hh)
+			outputs_trace[:, t] = forward_tensor
 
-	# def current2firing_time(self, x, tau=20.0, thr=0.2, tmax=1.0, epsilon=1e-7):
-	# 	""" Computes first firing time latency for a current input x assuming the charge time of a current based LIF neuron.
-	#
-	# 	Args:
-	# 	x -- The "current" values
-	#
-	# 	Keyword args:
-	# 	tau -- The membrane time constant of the LIF neuron to be charged
-	# 	thr -- The firing threshold value
-	# 	tmax -- The maximum time returned
-	# 	epsilon -- A generic (small) epsilon > 0
-	#
-	# 	Returns:
-	# 	Time to first spike for each "current" x
-	# 	"""
-	# 	idx = x < thr
-	# 	x = np.clip(x, thr + epsilon, 1e9)
-	# 	T = tau * np.log(x / (x - thr))
-	# 	T[idx] = tmax
-	# 	return T
-	#
-	# def sparse_data_generator(self, X, y, batch_size, nb_steps, nb_units, shuffle=True):
-	# 	""" This generator takes datasets in analog format and generates spiking network input as sparse tensors.
-	#
-	# 	Args:
-	# 		X: The data ( sample x event x 2 ) the last dim holds (time,neuron) tuples
-	# 		y: The labels
-	# 	"""
-	#
-	# 	labels_ = np.array(y, dtype=np.int)
-	# 	number_of_batches = len(X) // batch_size
-	# 	sample_index = np.arange(len(X))
-	#
-	# 	# compute discrete firing times
-	# 	tau_eff = 20e-3 / self.dt
-	# 	firing_times = np.array(self.current2firing_time(X, tau=tau_eff, tmax=nb_steps), dtype=int)
-	# 	unit_numbers = np.arange(nb_units)
-	#
-	# 	if shuffle:
-	# 		np.random.shuffle(sample_index)
-	#
-	# 	total_batch_count = 0
-	# 	counter = 0
-	# 	while counter < number_of_batches:
-	# 		batch_index = sample_index[batch_size * counter:batch_size * (counter + 1)]
-	#
-	# 		coo = [[] for i in range(3)]
-	# 		for bc, idx in enumerate(batch_index):
-	# 			c = firing_times[idx] < nb_steps
-	# 			times, units = firing_times[idx][c], unit_numbers[c]
-	#
-	# 			batch = [bc for _ in range(len(times))]
-	# 			coo[0].extend(batch)
-	# 			coo[1].extend(times)
-	# 			coo[2].extend(units)
-	#
-	# 		i = torch.LongTensor(coo).to(self.device)
-	# 		v = torch.FloatTensor(np.ones(len(coo[0]))).to(self.device)
-	#
-	# 		X_batch = torch.sparse.FloatTensor(i, v, torch.Size([batch_size, nb_steps, nb_units])).to(self.device)
-	# 		y_batch = torch.tensor(labels_[batch_index], device=self.device)
-	#
-	# 		yield X_batch.to(device=self.device), y_batch.to(device=self.device)
-	#
-	# 		counter += 1
+		return outputs_trace, hidden_states
+
+	def forward(self, inputs):
+		return self.forward_func(inputs)
 
 	def fit(
 			self,
-			data: DataLoader,
+			dataloader: DataLoader,
 			lr=1e-3,
 			nb_epochs=10,
-			batch_size=256,
 			criterion=None,
 			optimizer=None,
+			load_checkpoint_mode: LoadCheckpointMode = None,
+			log_func=print,
+			force_overwrite: bool = False,
 	):
+		self.train()
 		if criterion is None:
 			criterion = nn.NLLLoss()
 		if optimizer is None:
-			# optimizer = torch.optim.SGD(self.get_weights(), lr=lr)
-			optimizer = torch.optim.Adamax(self.get_weights(), lr=lr, betas=(0.9, 0.999))
+			optimizer = torch.optim.Adam(self.parameters(), lr=lr)
+
+		loss_history = []
+		start_epoch = 0
+		if load_checkpoint_mode is None:
+			assert os.path.exists(self.checkpoints_meta_path) or force_overwrite, \
+				f"{self.checkpoints_meta_path} already exists. " \
+				f"Set force_overwrite flag to True to overwrite existing saves."
+			if os.path.exists(self.checkpoints_meta_path) and force_overwrite:
+				shutil.rmtree(self.checkpoint_folder)
+		else:
+			try:
+				checkpoint = self.load_checkpoint(load_checkpoint_mode)
+				self.load_state_dict(checkpoint[SNN.CHECKPOINT_STATE_DICT_KEY], strict=True)
+				optimizer.load_state_dict(checkpoint[SNN.CHECKPOINT_OPTIMIZER_STATE_DICT_KEY])
+				start_epoch = int(checkpoint[SNN.CHECKPOINT_EPOCH_KEY]) + 1
+				loss_history = self.get_checkpoints_loss_history()
+			except FileNotFoundError:
+				logging.warning("No such checkpoint. Fit from beginning.")
+
+		if start_epoch >= nb_epochs:
+			return loss_history
 
 		log_softmax_fn = nn.LogSoftmax(dim=1)
+		best_loss = min(loss_history) if loss_history else np.inf
 		start_time = time.time()
-		loss_history = []
-		for epoch in range(nb_epochs):
-			epoch_loss = []
-			for x_batch, y_batch in data:
-				out, spikes, potential = self(x_batch.to_dense())
-				m, _ = torch.max(out, 1)
-				log_p_y = log_softmax_fn(m)
-
-				# Here we set up our regularizer loss
-				# The strength parameters here are merely a guess and there should be ample room for improvement by
-				# tuning these parameters.
-				reg_loss = 1e-5 * sum([torch.sum(s) for s in spikes])  # L1 loss on total number of spikes
-				reg_loss += 1e-5 * sum([torch.mean(torch.sum(torch.sum(s, dim=0), dim=0) ** 2) for s in spikes])  # L2 loss on spikes per neuron
-
-				# Here we combine supervised loss and the regularizer
-				batch_loss = criterion(log_p_y, y_batch.long()) + reg_loss
-
-				optimizer.zero_grad()
-				batch_loss.backward()
-				optimizer.step()
-				epoch_loss.append(batch_loss.item())
-			mean_loss = np.mean(epoch_loss)
+		printProgressBar(start_epoch, nb_epochs, log_func=log_func)
+		for epoch in range(start_epoch, nb_epochs):
+			epoch_loss = self._exec_epoch(
+				dataloader,
+				log_softmax_fn,
+				criterion,
+				optimizer,
+			)
+			loss_history.append(epoch_loss)
+			is_best = epoch_loss < best_loss
+			self.save_checkpoint(optimizer, epoch, float(epoch_loss), is_best)
+			if is_best:
+				best_loss = epoch_loss
 			elapsed_time = time.time() - start_time
-			printProgressBar(epoch+1, nb_epochs, current_elapse_seconds=elapsed_time, suffix=f"{mean_loss = :.5e}")
-			loss_history.append(mean_loss)
-
+			printProgressBar(
+				epoch + 1, nb_epochs,
+				current_elapse_seconds=elapsed_time,
+				suffix=f"{epoch_loss = :.5e}",
+				log_func=log_func
+			)
 		return loss_history
 
-	def compute_classification_accuracy(self, data: DataLoader, batch_size=256):
+	def _exec_epoch(
+			self,
+			dataloader,
+			log_softmax_fn,
+			criterion,
+			optimizer,
+	):
+		batch_losses = []
+		for x_batch, y_batch in dataloader:
+			batch_loss = self._exec_batch(
+				x_batch,
+				y_batch,
+				log_softmax_fn,
+				criterion,
+				optimizer,
+			)
+			batch_losses.append(batch_loss)
+		return np.mean(batch_losses)
+
+	def _exec_batch(
+			self,
+			x_batch,
+			y_batch,
+			log_softmax_fn,
+			criterion,
+			optimizer,
+	):
+		out, h_sates = self(x_batch.to(self.device))
+		m, _ = torch.max(out, 1)
+		log_p_y = log_softmax_fn(m)
+
+		# Here we set up our regularizer loss
+		# The strength parameters here are merely a guess and there should be ample room for improvement by
+		# tuning these parameters.
+		spikes = [h.Z for l_name, h_list in h_sates.items() for h in h_list if "Z" in h._asdict()]
+		reg_loss = 1e-5 * sum([torch.sum(s) for s in spikes])  # L1 loss on total number of spikes
+		reg_loss += 1e-5 * sum(
+			[torch.mean(torch.sum(torch.sum(s, dim=0), dim=0) ** 2) for s in spikes]
+		)  # L2 loss on spikes per neuron
+
+		# Here we combine supervised loss and the regularizer
+		batch_loss = criterion(log_p_y, y_batch.long().to(self.device)) + reg_loss
+
+		optimizer.zero_grad()
+		batch_loss.backward()
+		optimizer.step()
+		return batch_loss.item()
+
+	def _create_checkpoint_path(self, epoch: int = -1):
+		return f"./{self.checkpoint_folder}/{self.model_name}{SNN.SUFFIX_SEP}{SNN.CHECKPOINT_EPOCH_KEY}{epoch}{SNN.SAVE_EXT}"
+
+	def _create_new_checkpoint_meta(self, epoch: int, best: bool = False) -> dict:
+		save_path = self._create_checkpoint_path(epoch)
+		new_info = {SNN.CHECKPOINT_EPOCHS_KEY: {epoch: save_path}}
+		if best:
+			new_info[SNN.CHECKPOINT_BEST_KEY] = save_path
+		return new_info
+
+	def save_checkpoint(
+			self,
+			optimizer,
+			epoch: int,
+			epoch_loss: float = np.NaN,
+			best: bool = False,
+	):
+		os.makedirs(self.checkpoint_folder, exist_ok=True)
+		save_path = self._create_checkpoint_path(epoch)
+		torch.save({
+			SNN.CHECKPOINT_EPOCH_KEY: epoch,
+			SNN.CHECKPOINT_STATE_DICT_KEY: self.state_dict(),
+			SNN.CHECKPOINT_OPTIMIZER_STATE_DICT_KEY: optimizer.state_dict(),
+			SNN.CHECKPOINT_LOSS_KEY: epoch_loss,
+		}, save_path)
+		self.save_checkpoints_meta(self._create_new_checkpoint_meta(epoch, best))
+
+	@staticmethod
+	def get_save_path_from_checkpoints(
+			checkpoint: Dict[str, Union[str, Dict[int, str]]],
+			load_checkpoint_mode: LoadCheckpointMode = LoadCheckpointMode.BEST_EPOCH
+	) -> str:
+		if load_checkpoint_mode == load_checkpoint_mode.BEST_EPOCH:
+			return checkpoint[SNN.CHECKPOINT_BEST_KEY]
+		elif load_checkpoint_mode == load_checkpoint_mode.LAST_EPOCH:
+			epochs_dict = checkpoint[SNN.CHECKPOINT_EPOCHS_KEY]
+			last_epoch: int = max(epochs_dict)
+			return checkpoint[SNN.CHECKPOINT_EPOCHS_KEY][last_epoch]
+		else:
+			raise ValueError()
+
+	def get_checkpoints_loss_history(self):
+		with open(self.checkpoints_meta_path, "r+") as jsonFile:
+			meta: dict = json.load(jsonFile)
+		checkpoints = [torch.load(path) for path in meta[SNN.CHECKPOINT_EPOCHS_KEY].values()]
+		epoch_to_loss = {
+			int(c[SNN.CHECKPOINT_EPOCH_KEY]): c[SNN.CHECKPOINT_LOSS_KEY]
+			for c in checkpoints
+		}
+		history = [epoch_to_loss[k] for k in sorted(epoch_to_loss.keys())]
+		return history
+
+	def load_checkpoint(
+			self,
+			load_checkpoint_mode: LoadCheckpointMode = LoadCheckpointMode.BEST_EPOCH
+	) -> dict:
+		with open(self.checkpoints_meta_path, "r+") as jsonFile:
+			info: dict = json.load(jsonFile)
+		path = self.get_save_path_from_checkpoints(info, load_checkpoint_mode)
+		checkpoint = torch.load(path)
+		self.load_state_dict(checkpoint[SNN.CHECKPOINT_STATE_DICT_KEY], strict=True)
+		return checkpoint
+
+	def to_onnx(self, in_viz=None):
+		if in_viz is None:
+			in_viz = torch.randn((1, self.input_size), device=self.device)
+		torch.onnx.export(
+			self,
+			in_viz,
+			f"{self.checkpoint_folder}/{self.model_name}.onnx",
+			verbose=True,
+			input_names=None,
+			output_names=None,
+			opset_version=11
+		)
+
+	def save_checkpoints_meta(self, new_info: dict):
+		info = dict()
+		if os.path.exists(self.checkpoints_meta_path):
+			with open(self.checkpoints_meta_path, "r+") as jsonFile:
+				info = json.load(jsonFile)
+		mapping_update_recursively(info, new_info)
+		with open(self.checkpoints_meta_path, "w+") as jsonFile:
+			json.dump(info, jsonFile, indent=4)
+
+	def compute_classification_accuracy(self, data: DataLoader) -> float:
 		""" Computes classification accuracy on supplied data in batches. """
+		self.eval()
 		accs = []
 		for x_local, y_local in data:
-			out, spikes, _ = self(x_local.to_dense())
-			m, _ = torch.max(out, 1)  # max over time
+			out, _ = self(x_local.to(self.device))
+			m, _ = torch.max(out.detach().cpu(), 1)  # max over time
 			_, am = torch.max(m, 1)  # argmax over output units
 			tmp = np.mean((y_local == am).detach().cpu().numpy())  # compare to labels
 			accs.append(tmp)
 		return np.mean(accs)
-
