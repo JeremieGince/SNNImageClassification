@@ -16,7 +16,7 @@ from src.modules.snn import ForwardMth
 from src.modules.snn import LoadCheckpointMode, SNN
 from torchviz import make_dot
 
-from src.modules.spiking_layers import DynamicType
+from src.modules.spike_funcs import HeavisidePhiApprox
 
 
 def norm_255(x):
@@ -28,6 +28,8 @@ def get_dataloaders(
 		batch_size=64,
 		as_timeseries: bool = False,
 		nb_workers: int = 0,
+		dt=0.1,
+		T=100,
 ):
 	transforms = Compose([
 		ToTensor(),
@@ -52,10 +54,10 @@ def get_dataloaders(
 
 	if as_timeseries:
 		train_dataloader = dataset_to_timeseries(
-			train_dataset, batch_size=batch_size, nb_steps=100, tau_mem=20.0, shuffle=True
+			train_dataset, batch_size=batch_size, nb_steps=T, tau_mem=20.0, dt=dt, shuffle=True
 		)
 		test_dataloader = dataset_to_timeseries(
-			test_dataset, batch_size=batch_size, nb_steps=100, tau_mem=20.0, shuffle=False
+			test_dataset, batch_size=batch_size, nb_steps=T, tau_mem=20.0, dt=dt, shuffle=False
 		)
 	else:
 		train_dataloader = DataLoader(
@@ -72,25 +74,27 @@ if __name__ == '__main__':
 	logs_file_setup(__file__)
 	log_pytorch_device_setup()
 
-	ts = False
+	delta_t = 1e-3
+	n_steps = 100
+
+	ts = True
 	d_name = f"mnist"
 	logging.info(f"Dataset: {d_name}{'-ts' if ts else ''}")
-	dataloaders = get_dataloaders(d_name, batch_size=256, as_timeseries=ts)
+	dataloaders = get_dataloaders(d_name, batch_size=256, as_timeseries=ts, dt=delta_t, T=n_steps)
 
 	snn = SNN(
 		inputs_size=28 * 28,
 		output_size=10,
 		n_hidden_neurons=[100, ],
-		int_time_steps=100,
-		dt=1e-3,
-		checkpoint_folder=f"checkpoints-{d_name}{'-ts' if ts else ''}-lt-bellec",
-		forward_mth=ForwardMth.TIME_THEN_LAYER,
-		dynamicType=DynamicType.Bellec,
+		int_time_steps=n_steps,
+		dt=delta_t,
+		spike_func=HeavisidePhiApprox,
+		checkpoint_folder=f"checkpoints-{d_name}{'-ts' if ts else ''}",
 	)
 	# x_viz, _ = next(iter(dataloaders["train"]))
 	# out_viz, _ = snn(x_viz.to(snn.device))
 	# print(make_dot(out_viz).render("figures/snn_torchviz", format="png"))
-	# snn.to_onnx()
+	snn.to_onnx()
 	loss_hist = snn.fit(
 		dataloaders["train"],
 		lr=1e-3,
