@@ -42,9 +42,9 @@ class ToSpikes:
 	def __call__(self, x):
 		firing_periods = self.pixels_to_firing_periods(np.asarray(x))
 		spikes = np.zeros((self.n_steps, *firing_periods.shape), dtype=float)
+		starts = np.clip(firing_periods, 0, self.n_steps - 1).astype(int)
 		for i, period in enumerate(firing_periods):
-			start = int(np.clip(period, 0, self.n_steps - 1))
-			spikes[np.arange(start, self.n_steps, step=period, dtype=int), i] = 1.0
+			spikes[np.arange(starts[i], self.n_steps, step=period, dtype=int), i] = 1.0
 		return torch.tensor(spikes)
 
 
