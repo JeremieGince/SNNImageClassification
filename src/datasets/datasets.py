@@ -6,23 +6,30 @@ from torch.utils.data import DataLoader, Dataset
 
 
 class TimeSeriesMNISTDataset(Dataset):
-	def __init__(self, arr_timeseries, labels, transform=None, target_transform=None):
+	def __init__(self, arr_timeseries, labels, transform=None, target_transform=None, n_steps=100):
 		self.timeseries_labels = labels
 		self.timeseries_arrays = arr_timeseries
 		self.transform = transform
 		self.target_transform = target_transform
+		self.n_steps = n_steps
 
 	def __len__(self):
 		return len(self.timeseries_labels)
 
 	def __getitem__(self, idx):
-		timeseries = self.timeseries_arrays[idx, :]
+		firing_times = self.timeseries_arrays[idx, :]
+
+		spikes = np.zeros((self.n_steps, *firing_times.shape), dtype=float)
+		for i, period in enumerate(firing_times):
+			start = int(np.clip(period, 0, self.n_steps - 1))
+			spikes[np.arange(start, self.n_steps, step=period, dtype=int), i] = 1.0
+
 		label = self.timeseries_labels[idx]
 		if self.transform:
-			timeseries = self.transform(timeseries)
+			spikes = self.transform(spikes)
 		if self.target_transform:
 			label = self.target_transform(label)
-		return timeseries, label
+		return spikes, label
 
 
 def current_to_timeseries(
@@ -58,10 +65,10 @@ def current_to_timeseries(
 	# 			all_indices = None
 	# 		spikes[img_num, index, all_indices] = 1
 
-	spikes = np.ones((*X.shape, n_steps), dtype=float) * np.arange(0, n_steps, step=1)
-	spikes = np.sin(2*np.pi * spikes / np.expand_dims(indices, axis=-1))
-	spikes = (spikes >= 1.0).astype(float)
-	return spikes
+	# spikes = np.ones((*X.shape, n_steps), dtype=float) * np.arange(0, n_steps, step=1)
+	# spikes = np.sin(2*np.pi * spikes / np.expand_dims(indices, axis=-1))
+	# spikes = (spikes >= 1.0).astype(float)
+	return indices
 
 
 def timeseries_dataloader_generator(
@@ -88,9 +95,8 @@ def timeseries_dataloader_generator(
 	:return:
 	"""
 
-	labels_ = np.array(y)
 	firing_times = current_to_timeseries(X, n_steps, dt, tau_mem, thr)  #, dtype=int)
-	dataset = TimeSeriesMNISTDataset(firing_times, labels_, transform=transforms.ToTensor(), target_transform=transforms.ToTensor())
+	dataset = TimeSeriesMNISTDataset(firing_times, y, transform=torch.from_numpy, n_steps=n_steps)
 	return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
 
