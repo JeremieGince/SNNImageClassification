@@ -31,23 +31,23 @@ def get_dataloaders(
 		dt=0.1,
 		T=100,
 ):
-	transforms = Compose([
+	transform = Compose([
 		ToTensor(),
 		Lambda(norm_255),
 		Lambda(torch.flatten)
 	])
 	if dataset_name.lower() == "mnist":
 		root = os.path.expanduser("./data/datasets/torch/mnist")
-		train_dataset = MNIST(root, train=True, download=True, transform=transforms)
-		test_dataset = MNIST(root, train=False, download=True, transform=transforms)
+		train_dataset = MNIST(root, train=True, download=True, transform=transform)
+		test_dataset = MNIST(root, train=False, download=True, transform=transform)
 
 	elif dataset_name.lower() == "fashion_mnist":
 		root = os.path.expanduser("./data/datasets/torch/fashion-mnist")
 		train_dataset = torchvision.datasets.FashionMNIST(
-			root, train=True, transform=transforms, target_transform=None, download=True
+			root, train=True, transform=transform, target_transform=None, download=True
 		)
 		test_dataset = torchvision.datasets.FashionMNIST(
-			root, train=False, transform=transforms, target_transform=None, download=True
+			root, train=False, transform=transform, target_transform=None, download=True
 		)
 	else:
 		raise ValueError()
@@ -74,6 +74,8 @@ if __name__ == '__main__':
 	logs_file_setup(__file__)
 	log_pytorch_device_setup()
 
+	torch.autograd.set_detect_anomaly(True)
+
 	delta_t = 1e-3
 	n_steps = 100
 
@@ -94,7 +96,7 @@ if __name__ == '__main__':
 	# x_viz, _ = next(iter(dataloaders["train"]))
 	# out_viz, _ = snn(x_viz.to(snn.device))
 	# print(make_dot(out_viz).render("figures/snn_torchviz", format="png"))
-	snn.to_onnx()
+	# snn.to_onnx()
 	loss_hist = snn.fit(
 		dataloaders["train"],
 		lr=1e-3,
