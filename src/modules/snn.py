@@ -168,9 +168,13 @@ class SNN(torch.nn.Module):
 			t_diff = self.int_time_steps - inputs.shape[1]
 			assert t_diff >= 0, "inputs time steps must me less or equal to int_time_steps"
 			if t_diff > 0:
-				zero_inputs = torch.zeros((inputs.shape[0], t_diff, inputs.shape[-1]), device=self.device)
+				zero_inputs = torch.zeros(
+					(inputs.shape[0], t_diff, inputs.shape[-1]),
+					dtype=torch.float32,
+					device=self.device
+				)
 				inputs = torch.cat([inputs, zero_inputs], dim=1)
-		return inputs
+		return inputs.float()
 
 	def forward(self, inputs):
 		inputs = self._format_inputs(inputs)
@@ -185,13 +189,13 @@ class SNN(torch.nn.Module):
 		outputs_trace = torch.zeros((inputs.shape[0], self.int_time_steps, self.output_size), device=self.device)
 
 		for t in range(1, self.int_time_steps+1):
-			forward_tensor = inputs[:, t]
+			forward_tensor = inputs[:, t-1]
 			for layer_idx, (layer_name, layer) in enumerate(self.layers.items()):
 				hh = hidden_states[layer_name][t - 1]
 				forward_tensor, hidden_states[layer_name][t] = layer(forward_tensor, hh)
-			outputs_trace[:, t] = forward_tensor
+			outputs_trace[:, t-1] = forward_tensor
 
-		hidden_states = {layer_name: trace[1:] for layer_name, trace in self.layers.items()}
+		hidden_states = {layer_name: trace[1:] for layer_name, trace in hidden_states.items()}
 		# hidden_states = [trace[1:] for trace in hidden_states]
 		return outputs_trace, hidden_states
 
@@ -292,7 +296,7 @@ class SNN(torch.nn.Module):
 		# Here we set up our regularizer loss
 		# The strength parameters here are merely a guess and there should be ample room for improvement by
 		# tuning these parameters.
-		spikes = [h.Z for l_name, h_list in h_sates.items() for h in h_list if "Z" in h._asdict()]
+		spikes = [h[-1] for l_name, h_list in h_sates.items() for h in h_list if l_name.lower() != "readout"]  # TODO: create a get_spikes method
 		reg_loss = 1e-5 * sum([torch.sum(s) for s in spikes])  # L1 loss on total number of spikes
 		reg_loss += 1e-5 * sum(
 			[torch.mean(torch.sum(torch.sum(s, dim=0), dim=0) ** 2) for s in spikes]

@@ -5,10 +5,6 @@ import torch
 
 class SpikeFunction(torch.autograd.Function):
 	@staticmethod
-	def inputs_to_tensors(*inputs) -> List[torch.Tensor]:
-		return [torch.tensor(e for e in inputs)]
-
-	@staticmethod
 	def forward(
 			ctx: Any,
 			inputs: torch.Tensor,
@@ -21,7 +17,6 @@ class SpikeFunction(torch.autograd.Function):
 		we need to later backpropagate our error signals. To achieve this we use the
 		ctx.save_for_backward method.
 		"""
-		threshold, gamma = SpikeFunction.inputs_to_tensors(threshold, gamma)
 		ctx.save_for_backward(inputs, threshold, gamma)
 		out = torch.zeros_like(inputs)
 		out[inputs >= threshold] = 1.0
@@ -37,9 +32,9 @@ class SpikeFunction(torch.autograd.Function):
 		"""
 		raise NotImplementedError
 
-	@staticmethod
-	def symbolic(g, input: torch._C.Value) -> torch._C.Value:
-		return g.op("SpikeFunction", input, g.op("Constant", value_t=torch.tensor(0, dtype=torch.float)))
+	# @staticmethod
+	# def symbolic(g, inputs: torch._C.Value) -> torch._C.Value:
+	# 	return g.op("SpikeFunction", inputs, g.op("Constant", value_t=torch.tensor(0, dtype=torch.float)))
 
 
 class HeavisideSigmoidApprox(SpikeFunction):
