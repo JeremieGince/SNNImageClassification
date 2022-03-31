@@ -1,20 +1,10 @@
-import time
-from typing import Callable, Dict, NamedTuple
+from typing import NamedTuple, Tuple, Type
 
 import numpy as np
 import torch
-from pythonbasictools.progress_bar import printProgressBar
 from torch import nn
-from torch.utils.data import DataLoader
-from src.modules.spike_funcs import HeavisideSigmoidApprox
-import enum
 
-from src.modules.utils import SpikingInputSpec, SpikingInputType
-
-
-class DynamicType(enum.Enum):
-	Emre = enum.auto()
-	Bellec = enum.auto()
+from src.modules.spike_funcs import HeavisideSigmoidApprox, SpikeFunction
 
 
 class RNNLayer(torch.nn.Module):
@@ -23,7 +13,6 @@ class RNNLayer(torch.nn.Module):
 			input_size: int,
 			output_size: int,
 			use_recurrent_connection=True,
-			dynamicType: DynamicType = DynamicType.Emre,
 			dt=1e-3,
 			device=None,
 			**kwargs
@@ -37,46 +26,25 @@ class RNNLayer(torch.nn.Module):
 			self._set_default_device_()
 
 		self.dt = dt
-		self.dynamicType = dynamicType
 		self.kwargs = kwargs
 		self._set_default_kwargs()
 
 	def _set_default_kwargs(self):
-		if self.dynamicType == DynamicType.Emre:
-			self.kwargs.setdefault("tau_syn", 10e-3)
-			self.kwargs.setdefault("tau_mem", 5e-3)
-			self.kwargs.setdefault("threshold", 1.0)
-		elif self.dynamicType == DynamicType.Bellec:
-			self.kwargs.setdefault("tau_mem", 20)
-			self.kwargs.setdefault("tau_out", 20)
-			self.kwargs.setdefault("threshold", 1.0)
+		raise NotImplementedError()
 
 	def _set_default_device_(self):
 		self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
-	def get_forward_func(self) -> Callable:
-		dynamic_to_func = {
-			DynamicType.Emre: self.forward_Erme,
-			DynamicType.Bellec: self.forward_Bellec,
-		}
-		return dynamic_to_func[self.dynamicType]
-
-	def create_empty_state(self, batch_size: int = 1):
+	def create_empty_state(self, batch_size: int = 1) -> torch.Tensor:
 		raise NotImplementedError
 
-	def _init_forward_state(self, state: NamedTuple = None, batch_size: int = 1):
+	def _init_forward_state(self, state: torch.Tensor = None, batch_size: int = 1) -> torch.Tensor:
 		if state is None:
 			state = self.create_empty_state(batch_size)
 		return state
 
-	def forward_Erme(self, inputs: torch.Tensor, state: NamedTuple = None):
+	def forward(self, inputs: torch.Tensor, state: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor]:
 		raise NotImplementedError
-
-	def forward_Bellec(self, inputs: torch.Tensor, state: NamedTuple = None):
-		raise NotImplementedError
-
-	def forward(self, inputs: torch.Tensor, state=None):
-		return self.get_forward_func()(inputs, state)
 
 	def initialize_weights_(self):
 		for param in self.parameters():
@@ -102,8 +70,7 @@ class LIFLayer(RNNLayer):
 			input_size: int,
 			output_size: int,
 			use_recurrent_connection=True,
-			spike_func: torch.autograd.Function = HeavisideSigmoidApprox,
-			dynamicType: DynamicType = DynamicType.Emre,
+			spike_func: Type[SpikeFunction] = HeavisideSigmoidApprox,
 			dt=1e-3,
 			device=None,
 			**kwargs
@@ -112,15 +79,14 @@ class LIFLayer(RNNLayer):
 			input_size=input_size,
 			output_size=output_size,
 			use_recurrent_connection=use_recurrent_connection,
-			dynamicType=dynamicType,
 			dt=dt,
 			device=device,
 			**kwargs
 		)
 
 		self.forward_weights = nn.Parameter(
-				torch.empty((self.input_size, self.output_size), device=self.device),
-				requires_grad=True
+			torch.empty((self.input_size, self.output_size), device=self.device),
+			requires_grad=True
 		)
 
 		if use_recurrent_connection:
@@ -131,51 +97,103 @@ class LIFLayer(RNNLayer):
 		else:
 			self.recurrent_weights = None
 
-		self.alpha = np.exp(-dt / self.kwargs.get("tau_syn", 10e-3))
-		self.beta = np.exp(-dt / self.kwargs.get("tau_mem", 20))
-		self.threshold = self.kwargs.get("threshold", 1.0)
+		self.alpha = np.exp(-dt / self.kwargs["tau_m"])
+		self.threshold = self.kwargs["threshold"]
+		self.gamma = self.kwargs["gamma"]
 		self.spike_func = spike_func
 		self.initialize_weights_()
 
-	def create_empty_state(self, batch_size: int = 1) -> LIFState:
-		state = LIFState(
-			V=torch.zeros((batch_size, self.output_size), device=self.device, dtype=torch.float),
-			Z=torch.zeros((batch_size, self.output_size), device=self.device, dtype=torch.float),
-			I=torch.zeros((batch_size, self.output_size), device=self.device, dtype=torch.float),
-		)
+	def _set_default_kwargs(self):
+		self.kwargs.setdefault("tau_m", 20.0)
+		self.kwargs.setdefault("threshold", 1.0)
+		self.kwargs.setdefault("gamma", 1.0)
+
+	def create_empty_state(self, batch_size: int = 1) -> torch.Tensor:
+		"""
+		Create an empty state in the following form:
+			[[membrane potential of shape (batch_size, self.output_size)]
+			[spikes of shape (batch_size, self.output_size)]]
+		:param batch_size: The size of the current batch.
+		:return: The current state.
+		"""
+		# state = LIFState(
+		# 	V=torch.zeros((batch_size, self.output_size), device=self.device, dtype=torch.float),
+		# 	Z=torch.zeros((batch_size, self.output_size), device=self.device, dtype=torch.float),
+		# 	I=torch.zeros((batch_size, self.output_size), device=self.device, dtype=torch.float),
+		# )
+		state = torch.zeros((2, batch_size, self.output_size), device=self.device, dtype=torch.float)
 		return state
 
-	def forward_Erme(self, inputs: torch.Tensor, state: LIFState = None):
-		assert inputs.ndim == 2
-		batch_size, nb_features = inputs.shape
-		state = self._init_forward_state(state, batch_size)
-
-		input_current = torch.matmul(inputs, self.forward_weights)
-		if self.use_recurrent_connection:
-			rec_current = torch.matmul(state.Z, self.recurrent_weights)
-		else:
-			rec_current = 0.0
-
-		is_active = 1.0 - state.Z.detach()
-		next_I = self.alpha * state.I + input_current + rec_current
-		next_V = (self.beta * state.V + next_I) * is_active
-		next_Z = self.spike_func.apply(next_V - self.threshold)
-		next_state = LIFState(I=next_I, V=next_V, Z=next_Z)
-		return next_state.Z, next_state
-
-	def forward_Bellec(self, inputs: torch.Tensor, state: LIFState = None):
+	def forward(self, inputs: torch.Tensor, state: torch.Tensor = None):
 		assert inputs.ndim == 2
 		batch_size, nb_features = inputs.shape
 		state = self._init_forward_state(state, batch_size)
 		input_current = torch.matmul(inputs, self.forward_weights)
 		if self.use_recurrent_connection:
-			rec_current = torch.matmul(state.Z, self.recurrent_weights)
+			rec_current = torch.matmul(state[1], self.recurrent_weights)
 		else:
 			rec_current = 0.0
-		next_V = self.beta * state.V + input_current + rec_current - state.Z * self.threshold
-		next_Z = self.spike_func.apply(next_V - self.threshold)
-		next_state = LIFState(I=None, V=next_V, Z=next_Z)
-		return next_state.Z, next_state
+		state[0] = self.beta * state[0] + input_current + rec_current - state[1] * self.threshold
+		state[1] = self.spike_func.apply(state[0], self.threshold, self.gamma)
+		return state[1], state
+
+
+class ALIFLayer(LIFLayer):
+	def __init__(
+			self,
+			input_size: int,
+			output_size: int,
+			use_recurrent_connection=True,
+			spike_func: Type[SpikeFunction] = HeavisideSigmoidApprox,
+			dt=1e-3,
+			device=None,
+			**kwargs
+	):
+		super(ALIFLayer, self).__init__(
+			input_size=input_size,
+			output_size=output_size,
+			use_recurrent_connection=use_recurrent_connection,
+			spike_func=spike_func,
+			dt=dt,
+			device=device,
+			**kwargs
+		)
+		self.beta = np.exp(-dt / self.kwargs["tau_th"])
+		self.rho = np.exp(-dt / self.kwargs["tau_a"])
+
+	def _set_default_kwargs(self):
+		super(ALIFLayer, self)._set_default_kwargs()
+		self.kwargs.setdefault("tau_a", 20.0)
+		self.kwargs.setdefault("tau_th", 20.0)
+
+	def create_empty_state(self, batch_size: int = 1) -> torch.Tensor:
+		"""
+		Create an empty state in the following form:
+			[[membrane potential of shape (batch_size, self.output_size)]
+			[current threshold of shape (batch_size, self.output_size)]
+			[spikes of shape (batch_size, self.output_size)]]
+		:param batch_size: The size of the current batch.
+		:return: The current state.
+		"""
+		state = torch.zeros((3, batch_size, self.output_size), device=self.device, dtype=torch.float)
+		return state
+
+	def forward(self, inputs: torch.Tensor, state: torch.Tensor = None):
+		assert inputs.ndim == 2
+		batch_size, nb_features = inputs.shape
+		state = self._init_forward_state(state, batch_size)
+		next_state = self.create_empty_state(batch_size)
+		input_current = torch.matmul(inputs, self.forward_weights)
+		if self.use_recurrent_connection:
+			rec_current = torch.matmul(state[2], self.recurrent_weights)
+		else:
+			rec_current = 0.0
+		# v_j^{t+1} = \alpha * v_j^t + \sum_i W_{ji}*z_i^t + \sum_i W_{ji}^{in}x_i^{t+1} - z_j^t * v_{th}
+		next_state[0] = self.beta * state[0] + input_current + rec_current - state[1] * self.threshold
+		next_state[1] = self.rho * state[1] + state[2]  # a^{t+1} = \rho * a_j^t + z_j^t
+		A = self.threshold + self.beta * next_state[1]  # A_j^t = v_{th} + \beta * a_j^t
+		next_state[2] = self.spike_func.apply(next_state[0], A, self.gamma)  # z_j^t = H(v_j^t - A_j^t)
+		return state[2], state
 
 
 class ReadoutState(NamedTuple):
@@ -192,7 +210,6 @@ class ReadoutLayer(RNNLayer):
 			self,
 			input_size: int,
 			output_size: int,
-			dynamicType: DynamicType = DynamicType.Emre,
 			dt=1e-3,
 			device=None,
 			**kwargs
@@ -201,7 +218,6 @@ class ReadoutLayer(RNNLayer):
 			input_size=input_size,
 			output_size=output_size,
 			use_recurrent_connection=False,
-			dynamicType=dynamicType,
 			dt=dt,
 			device=device,
 			**kwargs
@@ -211,46 +227,32 @@ class ReadoutLayer(RNNLayer):
 			requires_grad=True
 		)
 		self.bias_weights = nn.Parameter(
-			torch.empty((self.output_size, ), device=self.device),
+			torch.empty((self.output_size,), device=self.device),
 			requires_grad=True
 		)
-		self.alpha = np.exp(-dt / self.kwargs.get("tau_syn", 10e-3))
-		self.beta = np.exp(-dt / self.kwargs.get("tau_mem", 5e-3))
-		self.kappa = np.exp(-self.dt / self.kwargs.get("tau_out", 20.0))
+		self.kappa = np.exp(-self.dt / self.kwargs["tau_out"])
 		self.initialize_weights_()
+
+	def _set_default_kwargs(self):
+		self.kwargs.setdefault("tau_out", 20.0)
 
 	def initialize_weights_(self):
 		super(ReadoutLayer, self).initialize_weights_()
 		torch.nn.init.constant_(self.bias_weights, 0.0)
 
-	def create_empty_state(self, batch_size: int = 1) -> ReadoutState:
-		state = ReadoutState(
-			V=torch.zeros((batch_size, self.output_size), device=self.device, dtype=torch.float),
-			I=torch.zeros((batch_size, self.output_size), device=self.device, dtype=torch.float),
-		)
+	def create_empty_state(self, batch_size: int = 1) -> torch.Tensor:
+		"""
+		Create an empty state in the following form:
+			[membrane potential of shape (batch_size, self.output_size)]
+		:param batch_size: The size of the current batch.
+		:return: The current state.
+		"""
+		state = torch.zeros((1, batch_size, self.output_size), device=self.device, dtype=torch.float)
 		return state
 
-	def forward_Erme(self, inputs: torch.Tensor, state: ReadoutState = None):
-		assert len(inputs.shape) == 2
-		batch_size, nb_features = inputs.shape
-		state = self._init_forward_state(state, batch_size)
-
-		next_I = self.alpha * state.I + torch.matmul(inputs, self.forward_weights) + self.bias_weights
-		next_V = self.beta * state.V + next_I
-		next_state = ReadoutState(I=next_I, V=next_V)
-		return next_state.V, next_state
-
-	def forward_Bellec(self, inputs: torch.Tensor, state: ReadoutState = None):
+	def forward(self, inputs: torch.Tensor, state: torch.Tensor = None):
 		assert inputs.ndim == 2
 		batch_size, nb_features = inputs.shape
 		state = self._init_forward_state(state, batch_size)
-		next_V = self.kappa * state.V + torch.matmul(inputs, self.forward_weights) + self.bias_weights
-		next_state = ReadoutState(I=None, V=next_V)
-		return next_state.V, next_state
-
-
-
-
-
-
-
+		state[0] = self.kappa * state[0] + torch.matmul(inputs, self.forward_weights) + self.bias_weights
+		return state[0], state

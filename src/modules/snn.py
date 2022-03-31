@@ -5,7 +5,7 @@ import os
 import shutil
 import time
 from copy import deepcopy
-from typing import Dict, Iterable, Union
+from typing import Dict, Iterable, Type, Union
 
 import numpy as np
 import psutil
@@ -14,8 +14,8 @@ from pythonbasictools.progress_bar import printProgressBar
 from torch import nn
 from torch.utils.data import DataLoader
 
-from src.modules.spike_funcs import HeavisideSigmoidApprox
-from src.modules.spiking_layers import DynamicType, LIFLayer, ReadoutLayer
+from src.modules.spike_funcs import HeavisideSigmoidApprox, SpikeFunction
+from src.modules.spiking_layers import LIFLayer, ReadoutLayer
 from src.modules.utils import mapping_update_recursively
 
 
@@ -57,19 +57,16 @@ class SNN(torch.nn.Module):
 			n_hidden_neurons: Iterable[int] = None,
 			use_recurrent_connection: Union[bool, Iterable[bool]] = True,
 			dt=1e-3,
-			int_time_steps=1_000,
-			spike_func: torch.autograd.Function = HeavisideSigmoidApprox,
-			forward_mth=ForwardMth.LAYER_THEN_TIME,
+			int_time_steps=100,
+			spike_func: Type[SpikeFunction] = HeavisideSigmoidApprox,
 			device=None,
 			checkpoint_folder: str = "checkpoints",
 			model_name: str = "snn",
-			dynamicType: DynamicType = DynamicType.Emre,
 			**kwargs
 	):
 		super(SNN, self).__init__()
 		self.input_size = inputs_size
 		self.output_size = output_size
-		self.dynamicType = dynamicType
 		self.kwargs = kwargs
 
 		self.device = device
@@ -88,19 +85,10 @@ class SNN(torch.nn.Module):
 		self.layers = nn.ModuleDict()
 		self._add_layers_()
 		self.initialize_weights_()
-		self.forward_mth = forward_mth
-		self.forward_func = self.get_forward_func(forward_mth)
 
 	@property
 	def checkpoints_meta_path(self) -> str:
 		return f"{self.checkpoint_folder}/{self.model_name}{SNN.SUFFIX_SEP}{SNN.CHECKPOINTS_META_SUFFIX}.json"
-
-	def get_forward_func(self, forward_mth: ForwardMth):
-		forward_mth_to_func = {
-			ForwardMth.LAYER_THEN_TIME: self.forward_layer_then_time,
-			ForwardMth.TIME_THEN_LAYER: self.forward_time_then_layer,
-		}
-		return forward_mth_to_func.get(forward_mth, ForwardMth.LAYER_THEN_TIME)
 
 	def _set_default_device_(self):
 		self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -115,7 +103,6 @@ class SNN(torch.nn.Module):
 			dt=self.dt,
 			spike_func=self.spike_func,
 			device=self.device,
-			dynamicType=self.dynamicType,
 			**self.kwargs
 		)
 
@@ -130,7 +117,6 @@ class SNN(torch.nn.Module):
 				dt=self.dt,
 				spike_func=self.spike_func,
 				device=self.device,
-				dynamicType=self.dynamicType,
 				**self.kwargs
 			)
 
@@ -144,7 +130,6 @@ class SNN(torch.nn.Module):
 			output_size=self.output_size,
 			dt=self.dt,
 			spike_func=self.spike_func,
-			dynamicType=self.dynamicType,
 			device=self.device,
 			**self.kwargs
 		)
@@ -187,55 +172,28 @@ class SNN(torch.nn.Module):
 				inputs = torch.cat([inputs, zero_inputs], dim=1)
 		return inputs
 
-	def forward_layer_then_time(self, inputs):
-		inputs = self._format_inputs(inputs)
-		layer_names = [layer_name for layer_name, _ in self.layers.items()]
-		hidden_states = {
-			layer_name: [None for t in range(self.int_time_steps)]
-			for layer_name, _ in self.layers.items()
-		}
-		hidden_outputs = {
-			layer_name: [None for t in range(self.int_time_steps)]
-			for layer_name, _ in self.layers.items()
-		}
-		outputs_trace = torch.zeros((inputs.shape[0], self.int_time_steps, self.output_size), device=self.device)
-
-		for layer_idx, (layer_name, layer) in enumerate(self.layers.items()):
-			if layer_idx == 0:
-				for t in range(self.int_time_steps):
-					hidden_outputs[layer_name][t], hidden_states[layer_name][t] = layer(inputs[:, t], None)
-			elif len(self.layers)-1 > layer_idx > 0:
-				for t in range(self.int_time_steps):
-					forward_tensor = hidden_outputs[layer_names[layer_idx-1]][t]
-					hh = hidden_states[layer_name][t - 1]
-					hidden_outputs[layer_name][t], hidden_states[layer_name][t] = layer(forward_tensor, hh)
-			else:
-				for t in range(self.int_time_steps):
-					forward_tensor = hidden_outputs[layer_names[layer_idx-1]][t]
-					hh = hidden_states[layer_name][t - 1]
-					outputs_trace[:, t], hidden_states[layer_name][t] = layer(forward_tensor, hh)
-
-		return outputs_trace, hidden_states
-
-	def forward_time_then_layer(self, inputs):
+	def forward(self, inputs):
 		inputs = self._format_inputs(inputs)
 		hidden_states = {
-			layer_name: [None for t in range(self.int_time_steps)]
+			layer_name: [None for t in range(self.int_time_steps+1)]
 			for layer_name, _ in self.layers.items()
 		}
+		# hidden_states = [
+		# 	[None for t in range(self.int_time_steps + 1)]
+		# 	for layer_idx, (layer_name, layer) in enumerate(self.layers.items())
+		# ]
 		outputs_trace = torch.zeros((inputs.shape[0], self.int_time_steps, self.output_size), device=self.device)
 
-		for t in range(self.int_time_steps):
+		for t in range(1, self.int_time_steps+1):
 			forward_tensor = inputs[:, t]
 			for layer_idx, (layer_name, layer) in enumerate(self.layers.items()):
-				hh = hidden_states[layer_name][t - 1] if t > 0 else None
+				hh = hidden_states[layer_name][t - 1]
 				forward_tensor, hidden_states[layer_name][t] = layer(forward_tensor, hh)
 			outputs_trace[:, t] = forward_tensor
 
+		hidden_states = {layer_name: trace[1:] for layer_name, trace in self.layers.items()}
+		# hidden_states = [trace[1:] for trace in hidden_states]
 		return outputs_trace, hidden_states
-
-	def forward(self, inputs):
-		return self.forward_func(inputs)
 
 	def fit(
 			self,
