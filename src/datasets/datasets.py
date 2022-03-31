@@ -5,6 +5,49 @@ from torchvision.datasets import MNIST
 from torch.utils.data import DataLoader, Dataset
 
 
+class ToSpikes:
+	def __init__(
+			self,
+			n_steps: int,
+			t_max: float,
+			tau=20.0,
+			thr=0.2,
+			epsilon=1e-7
+	):
+		"""
+		:param n_steps: The number of time step
+		:param t_max:
+		:param tau: The membrane time constant of the LIF neuron to be charged
+		:param thr: The firing threshold value
+		:param epsilon: A generic (small) epsilon > 0
+		"""
+		self.n_steps = n_steps
+		self.t_max = t_max
+		self.tau = tau
+		self.thr = thr
+		self.epsilon = epsilon
+
+	def pixels_to_firing_periods(self, x: np.ndarray):
+		"""
+		Computes first firing time latency for a current input x assuming the charge time of a current based LIF neuron.
+		:param x: the input pixels
+		:return: Time between spikes for each pixel of x
+		"""
+		t_per_step = self.t_max / self.n_steps
+		x = np.clip(x, self.thr + self.epsilon, 1e9)
+		T = self.tau * np.log(x / (x - self.thr))
+		indices = T // t_per_step
+		return indices
+
+	def __call__(self, x):
+		firing_periods = self.pixels_to_firing_periods(np.asarray(x))
+		spikes = np.zeros((self.n_steps, *firing_periods.shape), dtype=float)
+		for i, period in enumerate(firing_periods):
+			start = int(np.clip(period, 0, self.n_steps - 1))
+			spikes[np.arange(start, self.n_steps, step=period, dtype=int), i] = 1.0
+		return torch.tensor(spikes)
+
+
 class TimeSeriesMNISTDataset(Dataset):
 	def __init__(self, arr_timeseries, labels, transform=None, target_transform=None, n_steps=100):
 		self.timeseries_labels = labels
