@@ -31,14 +31,14 @@ def get_dataloaders(
 		T=100,
 		nb_workers: int = 0,
 ):
-	list_of_tranform = [
+	list_of_transform = [
 		ToTensor(),
 		Lambda(norm_255),
 		Lambda(torch.flatten)
 	]
 	if as_timeseries:
-		list_of_tranform.append(ToSpikes(n_steps=T, t_max=dt))
-	transform = Compose(list_of_tranform)
+		list_of_transform.append(ToSpikes(n_steps=T, t_max=dt))
+	transform = Compose(list_of_transform)
 
 	if dataset_name.lower() == "mnist":
 		root = os.path.expanduser("./data/datasets/torch/mnist")
@@ -97,7 +97,7 @@ if __name__ == '__main__':
 		as_timeseries=ts,
 		dt=delta_t,
 		T=n_steps,
-		nb_workers=psutil.cpu_count(logical=False)
+		# nb_workers=psutil.cpu_count(logical=False),
 	)
 
 	snn = SNN(
@@ -107,7 +107,7 @@ if __name__ == '__main__':
 		int_time_steps=n_steps,
 		dt=delta_t,
 		spike_func=HeavisidePhiApprox,
-		checkpoint_folder=f"checkpoints-{d_name}{'-ts' if ts else ''}-1",
+		checkpoint_folder=f"checkpoints-{d_name}{'-ts' if ts else ''}-profile",
 	)
 	# x_viz, _ = next(iter(dataloaders["train"]))
 	# out_viz, _ = snn(x_viz.to(snn.device))
