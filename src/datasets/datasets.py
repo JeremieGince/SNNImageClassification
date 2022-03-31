@@ -16,7 +16,7 @@ class TimeSeriesMNISTDataset(Dataset):
 		return len(self.timeseries_labels)
 
 	def __getitem__(self, idx):
-		timeseries = self.timeseries_arrays[idx]
+		timeseries = self.timeseries_arrays[idx, :]
 		label = self.timeseries_labels[idx]
 		if self.transform:
 			timeseries = self.transform(timeseries)
@@ -30,7 +30,7 @@ def current_to_timeseries(
 		n_steps: int,
 		t_max: float,
 		tau=20.0,
-		thr=0.2,  # todo trouver une méthode pour calculer le threshold ex moyenne des pixels
+		thr=0.2,
 		epsilon=1e-7
 ):
 	"""
@@ -45,13 +45,22 @@ def current_to_timeseries(
 	:return: Time to first spike for each "current" x
 	"""
 	t_per_step = t_max/n_steps
-	spikes = np.zeros((X.shape[0], n_steps), dtype=int)
+	# spikes = np.zeros((*X.shape, n_steps), dtype=int)
 	X = np.clip(X, thr + epsilon, 1e9)
 	T = tau * np.log(X / (X - thr))
 	indices = T // t_per_step
-	for index, i in enumerate(indices):
-		all_indices = np.arange(i, n_steps, step=i)
-		spikes[index, all_indices] = 1
+	# for img_num, img in enumerate(indices):
+	# 	for index, i in enumerate(img):
+	# 		start = int(np.clip(i, 0, n_steps-1))
+	# 		try:
+	# 			all_indices = np.arange(start, n_steps, step=i, dtype=int)
+	# 		except ValueError as err:
+	# 			all_indices = None
+	# 		spikes[img_num, index, all_indices] = 1
+
+	spikes = np.ones((*X.shape, n_steps), dtype=float) * np.arange(0, n_steps, step=1)
+	spikes = np.sin(2*np.pi * spikes / np.expand_dims(indices, axis=-1))
+	spikes = (spikes >= 1.0).astype(float)
 	return spikes
 
 
@@ -60,7 +69,7 @@ def timeseries_dataloader_generator(
 		y,
 		batch_size: int,
 		n_steps: int,
-		time_per_step: float,
+		dt: float,
 		thr: float,
 		tau_mem: float = 20,
 		shuffle=True
@@ -73,16 +82,21 @@ def timeseries_dataloader_generator(
 	:param y: Data labels
 	:param batch_size:
 	:param n_steps:
-	:param time_per_step:
+	:param dt:
 	:param tau_mem:
 	:param shuffle:
 	:return:
 	"""
 
 	labels_ = np.array(y)
-	firing_times = current_to_timeseries(X, n_steps, time_per_step, tau_mem, thr)  #, dtype=int)
-	dataset = TimeSeriesMNISTDataset(firing_times, labels_, transform=transforms.ToTensor())
+	firing_times = current_to_timeseries(X, n_steps, dt, tau_mem, thr)  #, dtype=int)
+	dataset = TimeSeriesMNISTDataset(firing_times, labels_, transform=transforms.ToTensor(), target_transform=transforms.ToTensor())
 	return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+
+
+def make_timeseries_current(arr_time: np.ndarray, threshold: float, period: float, add_noise: bool):
+	current = threshold * np.sin(arr_time*(period/(2*np.pi)))**2
+
 
 
 ########################################################################################################################
@@ -178,7 +192,7 @@ def sparse_dataloader_gen(
 	# 	counter += 1
 
 
-def dataset_to_timeseries(dataset: Dataset, batch_size: int, nb_steps: int, tau_mem: float = 20e-3, shuffle=True):
+def dataset_to_timeseries(dataset: Dataset, batch_size: int, nb_steps: int, dt, tau_mem: float = 20e-3, shuffle=True):
 	dataset.transform = transforms.Compose(
 		[
 			dataset.transform,
@@ -187,7 +201,7 @@ def dataset_to_timeseries(dataset: Dataset, batch_size: int, nb_steps: int, tau_
 	)
 	list_value_label = [dataset[i] for i in range(len(dataset))]
 	values, labels = list(zip(*list_value_label))
-	return sparse_dataloader_gen(np.array(values, dtype=float), np.array(labels), batch_size, nb_steps, tau_mem, shuffle)
+	return timeseries_dataloader_generator(np.array(values, dtype=float), np.array(labels), batch_size, nb_steps, dt, tau_mem, shuffle)#sparse_dataloader_gen
 
 
 if __name__ == '__main__':
