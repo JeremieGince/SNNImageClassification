@@ -1,3 +1,4 @@
+import enum
 from typing import NamedTuple, Tuple, Type
 
 import numpy as np
@@ -5,6 +6,11 @@ import torch
 from torch import nn
 
 from src.modules.spike_funcs import HeavisideSigmoidApprox, SpikeFunction
+
+
+class LayerType(enum.Enum):
+	LIF = enum.auto()
+	ALIF = enum.auto()
 
 
 class RNNLayer(torch.nn.Module):
@@ -83,9 +89,11 @@ class LIFLayer(RNNLayer):
 			use_recurrent_connection=True,
 			spike_func: Type[SpikeFunction] = HeavisideSigmoidApprox,
 			dt=1e-3,
+			use_rec_eye_mask=True,
 			device=None,
 			**kwargs
 	):
+		self.spike_func = spike_func
 		super(LIFLayer, self).__init__(
 			input_size=input_size,
 			output_size=output_size,
@@ -99,39 +107,49 @@ class LIFLayer(RNNLayer):
 			torch.empty((self.input_size, self.output_size), device=self.device, dtype=torch.float32),
 			requires_grad=True
 		)
-
+		self.use_rec_eye_mask = use_rec_eye_mask
 		if use_recurrent_connection:
 			self.recurrent_weights = nn.Parameter(
 				torch.empty((self.output_size, self.output_size), device=self.device, dtype=torch.float32),
 				requires_grad=True
 			)
+			if use_rec_eye_mask:
+				self.rec_mask = (1 - torch.eye(self.output_size, device=self.device, dtype=torch.float32))
+			else:
+				self.rec_mask = torch.ones((self.output_size, self.output_size), device=self.device, dtype=torch.float32)
 		else:
 			self.recurrent_weights = None
+			self.rec_mask = None
 
 		self.alpha = torch.tensor(np.exp(-dt / self.kwargs["tau_m"]), dtype=torch.float32, device=self.device)
 		self.threshold = torch.tensor(self.kwargs["threshold"], dtype=torch.float32, device=self.device)
 		self.gamma = torch.tensor(self.kwargs["gamma"], dtype=torch.float32, device=self.device)
-		self.spike_func = spike_func
 		self.initialize_weights_()
 
 	def _set_default_kwargs(self):
-		self.kwargs.setdefault("tau_m", 20.0)
+		self.kwargs.setdefault("tau_m", 10.0 * self.dt)
 		self.kwargs.setdefault("threshold", 1.0)
-		self.kwargs.setdefault("gamma", 1.0)
+		if isinstance(self.spike_func, HeavisideSigmoidApprox):
+			self.kwargs.setdefault("gamma", 100.0)
+		else:
+			self.kwargs.setdefault("gamma", 1.0)
+
+	def initialize_weights_(self):
+		gain = self.threshold.data
+		for param in self.parameters():
+			if param.ndim > 2:
+				torch.nn.init.xavier_normal_(param, gain=gain)
+			else:
+				torch.nn.init.normal_(param, std=gain)
 
 	def create_empty_state(self, batch_size: int = 1) -> Tuple[torch.Tensor, ...]:
 		"""
 		Create an empty state in the following form:
-			[[membrane potential of shape (batch_size, self.output_size)]
-			[spikes of shape (batch_size, self.output_size)]]
+			([membrane potential of shape (batch_size, self.output_size)],
+			[spikes of shape (batch_size, self.output_size)])
 		:param batch_size: The size of the current batch.
 		:return: The current state.
 		"""
-		# state = LIFState(
-		# 	V=torch.zeros((batch_size, self.output_size), device=self.device, dtype=torch.float),
-		# 	Z=torch.zeros((batch_size, self.output_size), device=self.device, dtype=torch.float),
-		# 	I=torch.zeros((batch_size, self.output_size), device=self.device, dtype=torch.float),
-		# )
 		state = tuple([torch.zeros(
 			(batch_size, self.output_size),
 			device=self.device,
@@ -149,12 +167,13 @@ class LIFLayer(RNNLayer):
 		# next_V, next_Z = self.create_empty_state(batch_size)
 		input_current = torch.matmul(inputs, self.forward_weights)
 		if self.use_recurrent_connection:
-			rec_current = torch.matmul(Z, self.recurrent_weights)
+			rec_current = torch.matmul(Z, torch.mul(self.recurrent_weights, self.rec_mask))
 		else:
 			rec_current = 0.0
-		next_V = self.alpha * V + input_current + rec_current - Z * self.threshold
+		# next_V = self.alpha * V + input_current + rec_current - Z.detach() * self.threshold
+		next_V = (self.alpha * V + input_current + rec_current) * (1.0 - Z.detach())
 		next_Z = self.spike_func.apply(next_V, self.threshold, self.gamma)
-		return next_V, (next_V, next_Z)
+		return next_Z, (next_V, next_Z)
 
 
 class ALIFLayer(LIFLayer):
@@ -165,6 +184,7 @@ class ALIFLayer(LIFLayer):
 			use_recurrent_connection=True,
 			spike_func: Type[SpikeFunction] = HeavisideSigmoidApprox,
 			dt=1e-3,
+			use_rec_eye_mask=True,
 			device=None,
 			**kwargs
 	):
@@ -174,16 +194,22 @@ class ALIFLayer(LIFLayer):
 			use_recurrent_connection=use_recurrent_connection,
 			spike_func=spike_func,
 			dt=dt,
+			use_rec_eye_mask=use_rec_eye_mask,
 			device=device,
 			**kwargs
 		)
-		self.beta = torch.tensor(np.exp(-dt / self.kwargs["tau_th"]), dtype=torch.float32, device=self.device)
+		self.beta = torch.tensor(self.kwargs["beta"], dtype=torch.float32, device=self.device)
 		self.rho = torch.tensor(np.exp(-dt / self.kwargs["tau_a"]), dtype=torch.float32, device=self.device)
 
 	def _set_default_kwargs(self):
-		super(ALIFLayer, self)._set_default_kwargs()
-		self.kwargs.setdefault("tau_a", 20.0)
-		self.kwargs.setdefault("tau_th", 20.0)
+		self.kwargs.setdefault("tau_m", 20.0 * self.dt)
+		self.kwargs.setdefault("tau_a", 200.0 * self.dt)
+		self.kwargs.setdefault("beta", 1.6)
+		self.kwargs.setdefault("threshold", 0.03)
+		if isinstance(self.spike_func, HeavisideSigmoidApprox):
+			self.kwargs.setdefault("gamma", 100.0)
+		else:
+			self.kwargs.setdefault("gamma", 0.3)
 
 	def create_empty_state(self, batch_size: int = 1) -> Tuple[torch.Tensor, ...]:
 		"""
@@ -208,11 +234,11 @@ class ALIFLayer(LIFLayer):
 		V, a, Z = self._init_forward_state(state, batch_size)
 		input_current = torch.matmul(inputs, self.forward_weights)
 		if self.use_recurrent_connection:
-			rec_current = torch.matmul(Z, self.recurrent_weights)
+			rec_current = torch.matmul(Z, torch.mul(self.recurrent_weights, self.rec_mask))
 		else:
 			rec_current = 0.0
 		# v_j^{t+1} = \alpha * v_j^t + \sum_i W_{ji}*z_i^t + \sum_i W_{ji}^{in}x_i^{t+1} - z_j^t * v_{th}
-		next_V = self.beta * V + input_current + rec_current - Z * self.threshold
+		next_V = (self.beta * V + input_current + rec_current) * (1.0 - Z.detach())
 		next_a = self.rho * a + Z  # a^{t+1} = \rho * a_j^t + z_j^t
 		A = self.threshold + self.beta * next_a  # A_j^t = v_{th} + \beta * a_j^t
 		next_Z = self.spike_func.apply(next_V, A, self.gamma)  # z_j^t = H(v_j^t - A_j^t)
@@ -257,7 +283,7 @@ class ReadoutLayer(RNNLayer):
 		self.initialize_weights_()
 
 	def _set_default_kwargs(self):
-		self.kwargs.setdefault("tau_out", 20.0)
+		self.kwargs.setdefault("tau_out", 10.0 * self.dt)
 
 	def initialize_weights_(self):
 		super(ReadoutLayer, self).initialize_weights_()
@@ -285,3 +311,10 @@ class ReadoutLayer(RNNLayer):
 		V, = self._init_forward_state(state, batch_size)
 		next_V = self.kappa * V + torch.matmul(inputs, self.forward_weights) + self.bias_weights
 		return next_V, (next_V, )
+
+
+LayerType2Layer = {
+	LayerType.LIF: LIFLayer,
+	LayerType.ALIF: ALIFLayer,
+}
+
