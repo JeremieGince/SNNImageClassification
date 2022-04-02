@@ -1,6 +1,12 @@
 from typing import Any, List
 
 import torch
+import enum
+
+
+class SpikeFuncType(enum.Enum):
+	FastSigmoid = enum.auto()
+	Phi = enum.auto()
 
 
 class SpikeFunction(torch.autograd.Function):
@@ -71,6 +77,12 @@ class HeavisidePhiApprox(SpikeFunction):
 			torch.zeros_like(inputs),  1 - torch.abs((inputs - threshold) / (threshold + HeavisidePhiApprox.epsilon))
 		)
 		return grad, None, None
+
+
+SpikeFuncType2Func = {
+	SpikeFuncType.FastSigmoid: HeavisideSigmoidApprox,
+	SpikeFuncType.Phi: HeavisidePhiApprox,
+}
 
 
 if __name__ == '__main__':
