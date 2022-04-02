@@ -1,18 +1,27 @@
+import enum
+import os
+
 import numpy as np
 import torch
-from torchvision import transforms
-from torchvision.datasets import MNIST
+from torchvision.datasets import MNIST, FashionMNIST
 from torch.utils.data import DataLoader, Dataset
+from torchvision.transforms import Compose, ToTensor
+
+
+class DatasetId(enum.Enum):
+	MNIST = enum.auto()
+	FASHION_MNIST = enum.auto()
 
 
 class ToSpikes:
 	def __init__(
 			self,
 			n_steps: int,
-			t_max: float,
-			tau=20.0,
+			t_max: float = None,
+			tau=20.0 * 1e-3,
 			thr=0.2,
-			epsilon=1e-7
+			use_periods=False,
+			epsilon=1e-7,
 	):
 		"""
 		:param n_steps: The number of time step
@@ -22,261 +31,125 @@ class ToSpikes:
 		:param epsilon: A generic (small) epsilon > 0
 		"""
 		self.n_steps = n_steps
-		self.t_max = t_max
+		self.t_max = n_steps if t_max is None else t_max
 		self.tau = tau
 		self.thr = thr
 		self.epsilon = epsilon
+		self.spikes_indices = None
+		self.use_periods = use_periods
+		self.spikes_gen_func = self.firing_periods_to_spikes if use_periods else self.firing_times_to_spikes
 
-	def pixels_to_firing_periods(self, x: np.ndarray):
+	def pixels_to_firing_periods(self, x: np.ndarray) -> np.ndarray:
 		"""
 		Computes first firing time latency for a current input x assuming the charge time of a current based LIF neuron.
-		:param x: the input pixels
+		:param x: the normalized between 0.0 and 1.0 input pixels
 		:return: Time between spikes for each pixel of x
 		"""
-		t_per_step = self.t_max / self.n_steps
-		x = np.clip(x, self.thr + self.epsilon, 1e9)
+		# t_per_step = self.t_max / self.n_steps
+		idx = x < self.thr
+		x = np.clip(x, self.thr + self.epsilon, 1.0e9)
 		T = self.tau * np.log(x / (x - self.thr))
-		indices = T // t_per_step
-		return indices
+		T[idx] = self.t_max
+		# periods = T // t_per_step
+		return T.astype(int)
 
-	def __call__(self, x):
-		firing_periods = self.pixels_to_firing_periods(np.asarray(x))
+	def firing_periods_to_spikes_loop(self, firing_periods: np.ndarray) -> np.ndarray:
 		spikes = np.zeros((self.n_steps, *firing_periods.shape), dtype=float)
 		starts = np.clip(firing_periods, 0, self.n_steps - 1).astype(int)
 		for i, period in enumerate(firing_periods):
 			spikes[np.arange(starts[i], self.n_steps, step=period, dtype=int), i] = 1.0
+		return spikes
+
+	def firing_periods_to_spikes_clip(self, firing_periods: np.ndarray) -> np.ndarray:
+		if self.spikes_indices is None:
+			self.spikes_indices = np.indices((self.n_steps, *firing_periods.shape))
+		starts = np.clip(firing_periods, 0, self.n_steps - 1, dtype=int)
+		# starts[starts > (self.n_steps - 1)] = self.n_steps - 1
+		spikes_range = self.spikes_indices[0] - starts[self.spikes_indices[1]]
+		spikes = ((spikes_range % firing_periods[self.spikes_indices[1]]) == 0) * (spikes_range >= 0)
+		return spikes.astype(float)
+
+	def firing_periods_to_spikes(self, firing_periods: np.ndarray) -> np.ndarray:
+		if self.spikes_indices is None:
+			self.spikes_indices = np.indices((self.n_steps, *firing_periods.shape))
+		firing_periods[firing_periods > (self.n_steps - 1)] = self.n_steps - 1
+		firing_periods[firing_periods < 1] = 1
+		spikes_range = self.spikes_indices[0] - firing_periods[self.spikes_indices[1]]
+		spikes = ((spikes_range % firing_periods[self.spikes_indices[1]]) == 0) * (spikes_range >= 0)
+		return spikes.astype(float)
+
+	def firing_times_to_spikes(self, firing_times: np.ndarray) -> np.ndarray:
+		spikes = np.zeros((self.n_steps, *firing_times.shape))
+		firing_times_mask = firing_times < self.n_steps
+		pix_indexes_masked = np.arange(len(firing_times))[firing_times_mask]
+		spikes[firing_times[firing_times_mask], pix_indexes_masked] = 1.
+		return spikes
+
+	def _format_inputs(self, x) -> np.ndarray:
+		if isinstance(x, torch.Tensor):
+			return x.numpy()
+		return x
+
+	def __call__(self, x) -> torch.Tensor:
+		x = self._format_inputs(x)
+		firing_periods: np.ndarray = self.pixels_to_firing_periods(x)
+		spikes = self.spikes_gen_func(firing_periods)
 		return torch.tensor(spikes)
 
 
-class TimeSeriesMNISTDataset(Dataset):
-	def __init__(self, arr_timeseries, labels, transform=None, target_transform=None, n_steps=100):
-		self.timeseries_labels = labels
-		self.timeseries_arrays = arr_timeseries
-		self.transform = transform
-		self.target_transform = target_transform
-		self.n_steps = n_steps
-
-	def __len__(self):
-		return len(self.timeseries_labels)
-
-	def __getitem__(self, idx):
-		firing_times = self.timeseries_arrays[idx, :]
-
-		spikes = np.zeros((self.n_steps, *firing_times.shape), dtype=float)
-		for i, period in enumerate(firing_times):
-			start = int(np.clip(period, 0, self.n_steps - 1))
-			spikes[np.arange(start, self.n_steps, step=period, dtype=int), i] = 1.0
-
-		label = self.timeseries_labels[idx]
-		if self.transform:
-			spikes = self.transform(spikes)
-		if self.target_transform:
-			label = self.target_transform(label)
-		return spikes, label
-
-
-def current_to_timeseries(
-		X,
-		n_steps: int,
-		t_max: float,
-		tau=20.0,
-		thr=0.2,
-		epsilon=1e-7
+def get_dataloaders(
+		dataset_id: DatasetId,
+		batch_size: int = 64,
+		train_val_split_ratio: float = 0.85,
+		as_timeseries: bool = True,
+		n_steps: int = 100,
+		to_spikes_use_periods: bool = False,
+		nb_workers: int = 0,
 ):
 	"""
-	Computes first firing time latency for a current input x assuming the charge time of a current based LIF neuron.
 
-	:param X: Current value
-	:param tau: The membrane time constant of the LIF neuron to be charged
-	:param thr: The firing threshold value
-	:param n_steps: The number of time step
-	:param t_max:
-	:param epsilon: A generic (small) epsilon > 0
-	:return: Time to first spike for each "current" x
-	"""
-	t_per_step = t_max/n_steps
-	# spikes = np.zeros((*X.shape, n_steps), dtype=int)
-	X = np.clip(X, thr + epsilon, 1e9)
-	T = tau * np.log(X / (X - thr))
-	indices = T // t_per_step
-	# for img_num, img in enumerate(indices):
-	# 	for index, i in enumerate(img):
-	# 		start = int(np.clip(i, 0, n_steps-1))
-	# 		try:
-	# 			all_indices = np.arange(start, n_steps, step=i, dtype=int)
-	# 		except ValueError as err:
-	# 			all_indices = None
-	# 		spikes[img_num, index, all_indices] = 1
-
-	# spikes = np.ones((*X.shape, n_steps), dtype=float) * np.arange(0, n_steps, step=1)
-	# spikes = np.sin(2*np.pi * spikes / np.expand_dims(indices, axis=-1))
-	# spikes = (spikes >= 1.0).astype(float)
-	return indices
-
-
-def timeseries_dataloader_generator(
-		X,
-		y,
-		batch_size: int,
-		n_steps: int,
-		dt: float,
-		thr: float,
-		tau_mem: float = 20,
-		shuffle=True
-):
-	"""
-	This generator takes datasets in analog format and generates spiking network input as sparse tensors.
-
-	:param thr:
-	:param X: The data ( sample x event x 2 ) the last dim holds (time,neuron) tuples
-	:param y: Data labels
+	:param dataset_id:
 	:param batch_size:
+	:param train_val_split_ratio: The ratio of train data (i.e. train_length/data_length).
+	:param as_timeseries:
 	:param n_steps:
-	:param dt:
-	:param tau_mem:
-	:param shuffle:
+	:param to_spikes_use_periods:
+	:param nb_workers:
 	:return:
 	"""
+	list_of_transform = [
+		ToTensor(),
+		torch.flatten,
+	]
+	if as_timeseries:
+		list_of_transform.append(ToSpikes(n_steps=n_steps, use_periods=to_spikes_use_periods))
+	transform = Compose(list_of_transform)
 
-	firing_times = current_to_timeseries(X, n_steps, dt, tau_mem, thr)  #, dtype=int)
-	dataset = TimeSeriesMNISTDataset(firing_times, y, transform=torch.from_numpy, n_steps=n_steps)
-	return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+	if dataset_id == DatasetId.MNIST:
+		root = os.path.expanduser("./data/datasets/torch/mnist")
+		train_dataset = MNIST(root, train=True, download=True, transform=transform)
+		test_dataset = MNIST(root, train=False, download=True, transform=transform)
+	elif dataset_id == DatasetId.FASHION_MNIST:
+		root = os.path.expanduser("./data/datasets/torch/fashion-mnist")
+		train_dataset = FashionMNIST(root, train=True, transform=transform, download=True)
+		test_dataset = FashionMNIST(root, train=False, transform=transform, download=True)
+	else:
+		raise ValueError()
 
+	train_length = int(len(train_dataset) * train_val_split_ratio)
+	val_length = len(train_dataset) - train_length
+	train_set, val_set = torch.utils.data.random_split(train_dataset, [train_length, val_length])
 
-def make_timeseries_current(arr_time: np.ndarray, threshold: float, period: float, add_noise: bool):
-	current = threshold * np.sin(arr_time*(period/(2*np.pi)))**2
-
-
-
-########################################################################################################################
-
-
-def current2firing_time(
-		X,
-		tau=20.0,
-		thr=0.2,  # todo trouver une méthode pour calculer le threshold ex moyenne des pixels
-		tmax=1.0,
-		epsilon=1e-7
-):
-	"""
-	Computes first firing time latency for a current input x assuming the charge time of a current based LIF neuron.
-
-	:param X: Current value
-	:param tau: The membrane time constant of the LIF neuron to be charged
-	:param thr: The firing threshold value
-	:param tmax: The maximum time returned
-	:param epsilon: A generic (small) epsilon > 0
-	:return: Time to first spike for each "current" x
-	"""
-	idx = X < thr
-	X = np.clip(X, thr + epsilon, 1e9)
-	T = tau * np.log(X / (X - thr))
-	T[idx] = tmax
-	# idx = torch.less(X, thr)
-	# X = torch.clamp(X, thr + epsilon, 1e9)
-	# T = tau * torch.log(X / (X - thr))
-	return T
-
-
-def sparse_dataloader_gen(
-		X,
-		y,
-		batch_size: int,
-		nb_steps: int,
-		# nb_units: int,
-		# time_per_step: float,
-		# device,
-		tau_mem: float = 20,
-		shuffle=True
-):
-	"""
-	This generator takes datasets in analog format and generates spiking network input as sparse tensors.
-
-	:param X: The data ( sample x event x 2 ) the last dim holds (time,neuron) tuples
-	:param y: Data labels
-	:param batch_size:
-	:param nb_steps:
-	:param nb_units:
-	:param time_per_step:
-	:param device:
-	:param tau_mem:
-	:param shuffle:
-	:return:
-	"""
-
-	labels_ = np.array(y)
-	# number_of_batches = len(X) // batch_size
-	# sample_index = np.arange(len(X))
-	# compute discrete firing times
-	# tau_eff = tau_mem / time_per_step
-	firing_times = current2firing_time(X, tau=tau_mem, tmax=nb_steps)  #, dtype=int)
-	dataset = TimeSeriesMNISTDataset(firing_times, labels_, transform=transforms.ToTensor())
-	return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
-	# unit_numbers = np.arange(nb_units)
-	# if shuffle:
-	# 	np.random.shuffle(sample_index)
-	# total_batch_count = 0
-	# counter = 0
-	# while counter < number_of_batches:
-	# 	batch_index = sample_index[batch_size * counter:batch_size * (counter + 1)]
-	#
-	# 	coo = [[] for _ in range(3)]
-	# 	for bc, idx in enumerate(batch_index):
-	# 		c = firing_times[idx] < nb_steps
-	# 		times, units = firing_times[idx][c], unit_numbers[c]
-	#
-	# 		batch = [bc for _ in range(len(times))]
-	# 		coo[0].extend(batch)
-	# 		coo[1].extend(times)
-	# 		coo[2].extend(units)
-	#
-	# 	i = torch.LongTensor(coo).to(device)
-	# 	v = torch.FloatTensor(np.ones(len(coo[0]))).to(device)
-	#
-	# 	X_batch = torch.sparse_coo_tensor(i, v, torch.Size([batch_size, nb_steps, nb_units])).to(device)
-	# 	y_batch = torch.tensor(labels_[batch_index], device=device)
-	#
-	# 	yield X_batch.to(device=device), y_batch.to(device=device)
-	#
-	# 	counter += 1
-
-
-def dataset_to_timeseries(dataset: Dataset, batch_size: int, nb_steps: int, dt, tau_mem: float = 20e-3, shuffle=True):
-	dataset.transform = transforms.Compose(
-		[
-			dataset.transform,
-			np.array
-		]
+	train_dataloader = DataLoader(
+		train_set, batch_size=batch_size, shuffle=True, num_workers=nb_workers
 	)
-	list_value_label = [dataset[i] for i in range(len(dataset))]
-	values, labels = list(zip(*list_value_label))
-	return timeseries_dataloader_generator(np.array(values, dtype=float), np.array(labels), batch_size, nb_steps, dt, tau_mem, shuffle)#sparse_dataloader_gen
-
-
-if __name__ == '__main__':
-	transform = transforms.Compose(
-		[
-			np.array,
-			transforms.Lambda(lambda a: a/255)
-		]
+	val_dataloader = DataLoader(
+		val_set, batch_size=batch_size, shuffle=False, num_workers=nb_workers
 	)
-	mnist_train = MNIST('./mnist', train=True, download=True, transform=transform)
-	# mnist_test = MNIST('src/datasets/mnist', train=False, download=True, transform=transform)
-	dataloader = dataset_to_timeseries(mnist_train, batch_size=60, nb_steps=100, tau_mem=20.0, shuffle=True)
-	train_features, train_labels = next(iter(dataloader))
-	print(type(train_features))
-	# print(f"Feature batch shape: {train_features.size()}")
-	# print(f"Labels batch shape: {train_labels.size()}")
-	# data_train = torch.utils.data.DataLoader(
-	# 	MNIST(
-	# 		'src/datasets/mnist', train=True, download=True,
-	# 		transform=transforms.Compose([
-	# 			transforms.ToTensor()
-	# 		])),
-	# 	batch_size=64,
-	# 	shuffle=True
-	# )
-	#
-	# test_loader = torch.utils.data.DataLoader(
-	# 	MNIST('src/datasets/mnist', train=False, download=True),
-	# 	batch_size=batch_size, **kwargs)
+	test_dataloader = DataLoader(
+		test_dataset, batch_size=batch_size, shuffle=False, num_workers=nb_workers
+	)
+	return dict(train=train_dataloader, val=val_dataloader, test=test_dataloader)
+
+
+
