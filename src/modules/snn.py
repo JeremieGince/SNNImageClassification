@@ -5,18 +5,20 @@ import os
 import shutil
 import time
 from copy import deepcopy
-from typing import Dict, Iterable, Type, Union
+from typing import Any, Dict, Iterable, List, Tuple, Type, Union
 
+import matplotlib.pyplot as plt
 import numpy as np
 import psutil
 import torch
 from pythonbasictools.progress_bar import printProgressBar
-from torch import nn
+from torch import Tensor, nn
 from torch.utils.data import DataLoader
+import torch.nn.functional as F
 
-from src.modules.spike_funcs import HeavisideSigmoidApprox, SpikeFunction
-from src.modules.spiking_layers import LIFLayer, ReadoutLayer
-from src.modules.utils import mapping_update_recursively
+from src.modules.spike_funcs import HeavisideSigmoidApprox, SpikeFuncType, SpikeFunction, SpikeFuncType2Func
+from src.modules.spiking_layers import LIFLayer, LayerType, LayerType2Layer, ReadoutLayer
+from src.modules.utils import LossHistory, batchwise_temporal_filter, mapping_update_recursively
 
 
 class ReadoutMth(enum.Enum):
@@ -58,7 +60,8 @@ class SNN(torch.nn.Module):
 			use_recurrent_connection: Union[bool, Iterable[bool]] = True,
 			dt=1e-3,
 			int_time_steps=100,
-			spike_func: Type[SpikeFunction] = HeavisideSigmoidApprox,
+			spike_func: Union[Type[SpikeFunction], SpikeFuncType] = HeavisideSigmoidApprox,
+			hidden_layer_type: Union[Type[LIFLayer], LayerType] = LIFLayer,
 			device=None,
 			checkpoint_folder: str = "checkpoints",
 			model_name: str = "snn",
@@ -75,16 +78,25 @@ class SNN(torch.nn.Module):
 
 		self.dt = dt
 		self.int_time_steps = int_time_steps
+		if isinstance(spike_func, SpikeFuncType):
+			spike_func = SpikeFuncType2Func[spike_func]
 		self.spike_func = spike_func
+		if isinstance(hidden_layer_type, LayerType):
+			hidden_layer_type = LayerType2Layer[hidden_layer_type]
+		self.hidden_layer_type = hidden_layer_type
 
 		self.checkpoint_folder = checkpoint_folder
 		self.model_name = model_name
 
+		if isinstance(n_hidden_neurons, int):
+			n_hidden_neurons = [n_hidden_neurons]
 		self.n_hidden_neurons = n_hidden_neurons if n_hidden_neurons is not None else []
 		self.use_recurrent_connection = use_recurrent_connection
 		self.layers = nn.ModuleDict()
 		self._add_layers_()
 		self.initialize_weights_()
+
+		self.loss_history = LossHistory()
 
 	@property
 	def checkpoints_meta_path(self) -> str:
@@ -96,7 +108,7 @@ class SNN(torch.nn.Module):
 	def _add_input_layer_(self):
 		if not self.n_hidden_neurons:
 			return
-		self.layers["input"] = LIFLayer(
+		self.layers["input"] = self.hidden_layer_type(
 			input_size=self.input_size,
 			output_size=self.n_hidden_neurons[0],
 			use_recurrent_connection=self.use_recurrent_connection,
@@ -110,7 +122,7 @@ class SNN(torch.nn.Module):
 		if not self.n_hidden_neurons:
 			return
 		for i, hn in enumerate(self.n_hidden_neurons[:-1]):
-			self.layers[f"hidden_{i}"] = LIFLayer(
+			self.layers[f"hidden_{i}"] = self.hidden_layer_type(
 				input_size=hn,
 				output_size=self.n_hidden_neurons[i + 1],
 				use_recurrent_connection=self.use_recurrent_connection,
@@ -176,47 +188,110 @@ class SNN(torch.nn.Module):
 				inputs = torch.cat([inputs, zero_inputs], dim=1)
 		return inputs.float()
 
+	def _format_hidden_outputs(
+			self,
+			hidden_states: Dict[str, List[Tuple[torch.Tensor, ...]]]
+	) -> Dict[str, Tuple[torch.Tensor, ...]]:
+		"""
+		Permute the hidden states to have a dictionary of shape {layer_name: (tensor, ...)}
+		:param hidden_states: Dictionary of hidden states
+		:return: Dictionary of hidden states with the shape {layer_name: (tensor, ...)}
+		"""
+		hidden_states = {
+			layer_name: tuple([torch.stack(e, dim=1) for e in list(zip(*trace))])
+			for layer_name, trace in hidden_states.items()
+		}
+		return hidden_states
+
 	def forward(self, inputs):
 		inputs = self._format_inputs(inputs)
 		hidden_states = {
 			layer_name: [None for t in range(self.int_time_steps+1)]
 			for layer_name, _ in self.layers.items()
 		}
-		# hidden_states = [
-		# 	[None for t in range(self.int_time_steps + 1)]
-		# 	for layer_idx, (layer_name, layer) in enumerate(self.layers.items())
-		# ]
-		outputs_trace = torch.zeros((inputs.shape[0], self.int_time_steps, self.output_size), device=self.device)
+		outputs_trace: List[torch.Tensor] = []
 
 		for t in range(1, self.int_time_steps+1):
 			forward_tensor = inputs[:, t-1]
 			for layer_idx, (layer_name, layer) in enumerate(self.layers.items()):
 				hh = hidden_states[layer_name][t - 1]
 				forward_tensor, hidden_states[layer_name][t] = layer(forward_tensor, hh)
-			outputs_trace[:, t-1] = forward_tensor
+			outputs_trace.append(forward_tensor)
 
 		hidden_states = {layer_name: trace[1:] for layer_name, trace in hidden_states.items()}
-		# hidden_states = [trace[1:] for trace in hidden_states]
-		return outputs_trace, hidden_states
+		hidden_states = self._format_hidden_outputs(hidden_states)
+		outputs_trace_tensor = torch.stack(outputs_trace, dim=1)
+		return outputs_trace_tensor, hidden_states
+
+	def get_prediction_logits(
+			self,
+			inputs: torch.Tensor,
+			re_outputs_trace: bool = True,
+			re_hidden_states: bool = True
+	) -> Union[tuple[Tensor, Any, Any], tuple[Tensor, Any], Tensor]:
+		outputs_trace, hidden_states = self(inputs.to(self.device))
+		logits, _ = torch.max(outputs_trace, dim=1)
+		# logits = batchwise_temporal_filter(outputs_trace, decay=0.9)
+		if re_outputs_trace and re_hidden_states:
+			return logits, outputs_trace, hidden_states
+		elif re_outputs_trace:
+			return logits, outputs_trace
+		elif re_hidden_states:
+			return logits, hidden_states
+		else:
+			return logits
+
+	def get_prediction_proba(
+			self,
+			inputs: torch.Tensor,
+			re_outputs_trace: bool = True,
+			re_hidden_states: bool = True
+	) -> Union[tuple[Tensor, Any, Any], tuple[Tensor, Any], Tensor]:
+		m, *outs = self.get_prediction_logits(inputs, re_outputs_trace, re_hidden_states)
+		if re_outputs_trace or re_hidden_states:
+			return F.softmax(m, dim=-1), *outs
+		return m
+
+	def get_prediction_log_proba(
+			self,
+			inputs: torch.Tensor,
+			re_outputs_trace: bool = True,
+			re_hidden_states: bool = True
+	) -> Union[tuple[Tensor, Any, Any], tuple[Tensor, Any], Tensor]:
+		m, *outs = self.get_prediction_logits(inputs, re_outputs_trace, re_hidden_states)
+		if re_outputs_trace or re_hidden_states:
+			return F.log_softmax(m, dim=-1), *outs
+		return m
+
+	def get_spikes_count_per_neuron(self, hidden_states: Dict[str, List[torch.Tensor]]) -> torch.Tensor:
+		"""
+		Get the spikes count per neuron from the hidden states
+		:return:
+		"""
+		counts = []
+		for l_name, traces in hidden_states.items():
+			if isinstance(self.layers[l_name], LIFLayer):
+				counts.extend(traces[-1].sum(dim=(0, 1)).tolist())
+		return torch.tensor(counts, dtype=torch.float32, device=self.device)
 
 	def fit(
 			self,
-			dataloader: DataLoader,
+			train_dataloader: DataLoader,
+			val_dataloader: DataLoader,
 			lr=1e-3,
-			nb_epochs=10,
+			nb_epochs=30,
 			criterion=None,
 			optimizer=None,
 			load_checkpoint_mode: LoadCheckpointMode = None,
 			log_func=print,
 			force_overwrite: bool = False,
+			verbose: bool = True,
 	):
-		self.train()
 		if criterion is None:
 			criterion = nn.NLLLoss()
 		if optimizer is None:
 			optimizer = torch.optim.Adam(self.parameters(), lr=lr)
 
-		loss_history = []
 		start_epoch = 0
 		if load_checkpoint_mode is None:
 			assert os.path.exists(self.checkpoints_meta_path) or force_overwrite, \
@@ -230,42 +305,54 @@ class SNN(torch.nn.Module):
 				self.load_state_dict(checkpoint[SNN.CHECKPOINT_STATE_DICT_KEY], strict=True)
 				optimizer.load_state_dict(checkpoint[SNN.CHECKPOINT_OPTIMIZER_STATE_DICT_KEY])
 				start_epoch = int(checkpoint[SNN.CHECKPOINT_EPOCH_KEY]) + 1
-				loss_history = self.get_checkpoints_loss_history()
+				self.loss_history = self.get_checkpoints_loss_history()
 			except FileNotFoundError:
-				logging.warning("No such checkpoint. Fit from beginning.")
+				if verbose:
+					logging.warning("No such checkpoint. Fit from beginning.")
 
 		if start_epoch >= nb_epochs:
-			return loss_history
+			return self.loss_history
 
-		log_softmax_fn = nn.LogSoftmax(dim=1)
-		best_loss = min(loss_history) if loss_history else np.inf
+		best_loss = self.loss_history.min('val')
 		start_time = time.time()
-		printProgressBar(start_epoch, nb_epochs, log_func=log_func)
+		if verbose:
+			printProgressBar(start_epoch, nb_epochs, log_func=log_func)
 		for epoch in range(start_epoch, nb_epochs):
-			epoch_loss = self._exec_epoch(
-				dataloader,
-				log_softmax_fn,
-				criterion,
-				optimizer,
-			)
-			loss_history.append(epoch_loss)
-			is_best = epoch_loss < best_loss
-			self.save_checkpoint(optimizer, epoch, float(epoch_loss), is_best)
+			epoch_loss = self._exec_phase(train_dataloader, val_dataloader, criterion, optimizer)
+			self.loss_history.concat(epoch_loss)
+			is_best = epoch_loss['val'] < best_loss
+			self.save_checkpoint(optimizer, epoch, epoch_loss, is_best)
 			if is_best:
-				best_loss = epoch_loss
+				best_loss = epoch_loss['val']
 			elapsed_time = time.time() - start_time
-			printProgressBar(
-				epoch + 1, nb_epochs,
-				current_elapse_seconds=elapsed_time,
-				suffix=f"{epoch_loss = :.5e}",
-				log_func=log_func
-			)
-		return loss_history
+			if verbose:
+				printProgressBar(
+					epoch + 1, nb_epochs,
+					current_elapse_seconds=elapsed_time,
+					suffix=f"train_loss: {epoch_loss['train']:.5e}, val_loss: {epoch_loss['val']:.5e}",
+					log_func=log_func
+				)
+		self.plot_loss_history(show=False)
+		return self.loss_history
+
+	def _exec_phase(self, train_dataloader, val_dataloader, criterion, optimizer):
+		self.train()
+		train_loss = self._exec_epoch(
+			train_dataloader,
+			criterion,
+			optimizer,
+		)
+		self.eval()
+		val_loss = self._exec_epoch(
+			val_dataloader,
+			criterion,
+			optimizer,
+		)
+		return dict(train=train_loss, val=val_loss)
 
 	def _exec_epoch(
 			self,
 			dataloader,
-			log_softmax_fn,
 			criterion,
 			optimizer,
 	):
@@ -274,7 +361,6 @@ class SNN(torch.nn.Module):
 			batch_loss = self._exec_batch(
 				x_batch,
 				y_batch,
-				log_softmax_fn,
 				criterion,
 				optimizer,
 			)
@@ -285,30 +371,39 @@ class SNN(torch.nn.Module):
 			self,
 			x_batch,
 			y_batch,
-			log_softmax_fn,
 			criterion,
 			optimizer,
 	):
-		out, h_sates = self(x_batch.to(self.device))
-		m, _ = torch.max(out, 1)
-		log_p_y = log_softmax_fn(m)
+		if self.training:
+			log_p_y, out, h_sates = self.get_prediction_log_proba(x_batch, re_outputs_trace=True, re_hidden_states=True)
+		else:
+			with torch.no_grad():
+				log_p_y, out, h_sates = self.get_prediction_log_proba(
+					x_batch, re_outputs_trace=True, re_hidden_states=True
+				)
 
-		# Here we set up our regularizer loss
-		# The strength parameters here are merely a guess and there should be ample room for improvement by
-		# tuning these parameters.
-		spikes = [h[-1] for l_name, h_list in h_sates.items() for h in h_list if l_name.lower() != "readout"]  # TODO: create a get_spikes method
-		reg_loss = 1e-5 * sum([torch.sum(s) for s in spikes])  # L1 loss on total number of spikes
-		reg_loss += 1e-5 * sum(
-			[torch.mean(torch.sum(torch.sum(s, dim=0), dim=0) ** 2) for s in spikes]
-		)  # L2 loss on spikes per neuron
+		# reg_loss = torch.mean(self.get_spikes_count_per_neuron(h_sates))
+		# spikes = [h[-1] for l_name, h_list in h_sates.items() for h in h_list if l_name.lower() != "readout"]  # TODO: create a get_spikes method
+		# reg_loss = 1e-5 * sum([torch.sum(s) for s in spikes])  # L1 loss on total number of spikes
+		# reg_loss = 1e-5 * sum(
+		# 	[torch.mean(torch.sum(torch.sum(s, dim=0), dim=0) ** 2) for s in spikes]
+		# )  # L2 loss on spikes per neuron
+		# reg_loss = torch.mean(self.get_spikes_count_per_neuron(h_sates) ** 2)
 
-		# Here we combine supervised loss and the regularizer
-		batch_loss = criterion(log_p_y, y_batch.long().to(self.device)) + reg_loss
+		batch_loss = criterion(log_p_y, y_batch.long().to(self.device))
 
-		optimizer.zero_grad()
-		batch_loss.backward()
-		optimizer.step()
+		if self.training:
+			optimizer.zero_grad()
+			batch_loss.backward()
+			optimizer.step()
 		return batch_loss.item()
+
+	def plot_loss_history(self, loss_history: LossHistory = None, show=False):
+		if loss_history is None:
+			loss_history = self.loss_history
+		save_path = f"./{self.checkpoint_folder}/loss_history.png"
+		os.makedirs(f"./{self.checkpoint_folder}/", exist_ok=True)
+		loss_history.plot(save_path, show)
 
 	def _create_checkpoint_path(self, epoch: int = -1):
 		return f"./{self.checkpoint_folder}/{self.model_name}{SNN.SUFFIX_SEP}{SNN.CHECKPOINT_EPOCH_KEY}{epoch}{SNN.SAVE_EXT}"
@@ -324,7 +419,7 @@ class SNN(torch.nn.Module):
 			self,
 			optimizer,
 			epoch: int,
-			epoch_loss: float = np.NaN,
+			epoch_losses: Dict[str, Any],
 			best: bool = False,
 	):
 		os.makedirs(self.checkpoint_folder, exist_ok=True)
@@ -333,33 +428,31 @@ class SNN(torch.nn.Module):
 			SNN.CHECKPOINT_EPOCH_KEY: epoch,
 			SNN.CHECKPOINT_STATE_DICT_KEY: self.state_dict(),
 			SNN.CHECKPOINT_OPTIMIZER_STATE_DICT_KEY: optimizer.state_dict(),
-			SNN.CHECKPOINT_LOSS_KEY: epoch_loss,
+			SNN.CHECKPOINT_LOSS_KEY: epoch_losses,
 		}, save_path)
 		self.save_checkpoints_meta(self._create_new_checkpoint_meta(epoch, best))
 
 	@staticmethod
 	def get_save_path_from_checkpoints(
-			checkpoint: Dict[str, Union[str, Dict[int, str]]],
+			checkpoints_meta: Dict[str, Union[str, Dict[int, str]]],
 			load_checkpoint_mode: LoadCheckpointMode = LoadCheckpointMode.BEST_EPOCH
 	) -> str:
 		if load_checkpoint_mode == load_checkpoint_mode.BEST_EPOCH:
-			return checkpoint[SNN.CHECKPOINT_BEST_KEY]
+			return checkpoints_meta[SNN.CHECKPOINT_BEST_KEY]
 		elif load_checkpoint_mode == load_checkpoint_mode.LAST_EPOCH:
-			epochs_dict = checkpoint[SNN.CHECKPOINT_EPOCHS_KEY]
+			epochs_dict = checkpoints_meta[SNN.CHECKPOINT_EPOCHS_KEY]
 			last_epoch: int = max(epochs_dict)
-			return checkpoint[SNN.CHECKPOINT_EPOCHS_KEY][last_epoch]
+			return checkpoints_meta[SNN.CHECKPOINT_EPOCHS_KEY][last_epoch]
 		else:
 			raise ValueError()
 
-	def get_checkpoints_loss_history(self):
+	def get_checkpoints_loss_history(self) -> LossHistory:
+		history = LossHistory()
 		with open(self.checkpoints_meta_path, "r+") as jsonFile:
 			meta: dict = json.load(jsonFile)
 		checkpoints = [torch.load(path) for path in meta[SNN.CHECKPOINT_EPOCHS_KEY].values()]
-		epoch_to_loss = {
-			int(c[SNN.CHECKPOINT_EPOCH_KEY]): c[SNN.CHECKPOINT_LOSS_KEY]
-			for c in checkpoints
-		}
-		history = [epoch_to_loss[k] for k in sorted(epoch_to_loss.keys())]
+		for checkpoint in checkpoints:
+			history.concat(checkpoint[SNN.CHECKPOINT_LOSS_KEY])
 		return history
 
 	def load_checkpoint(
@@ -395,14 +488,45 @@ class SNN(torch.nn.Module):
 		with open(self.checkpoints_meta_path, "w+") as jsonFile:
 			json.dump(info, jsonFile, indent=4)
 
-	def compute_classification_accuracy(self, data: DataLoader) -> float:
+	def compute_classification_accuracy(self, dataloader: DataLoader) -> float:
 		""" Computes classification accuracy on supplied data in batches. """
 		self.eval()
 		accs = []
-		for x_local, y_local in data:
-			out, _ = self(x_local.to(self.device))
-			m, _ = torch.max(out.detach().cpu(), 1)  # max over time
-			_, am = torch.max(m, 1)  # argmax over output units
-			tmp = np.mean((y_local == am).detach().cpu().numpy())  # compare to labels
-			accs.append(tmp)
+		with torch.no_grad():
+			for i, (inputs, classes) in enumerate(dataloader):
+				inputs = inputs.to(self.device)
+				classes = classes.to(self.device)
+				outputs = self.get_prediction_proba(inputs, re_outputs_trace=False, re_hidden_states=False)
+				_, preds = torch.max(outputs, -1)
+				accs.append(torch.mean((preds == classes).float()).detach().cpu().item())
 		return np.mean(accs)
+
+	def compute_confusion_matrix(
+			self,
+			nb_classes: int,
+			dataloaders: Dict[str, DataLoader],
+			fit=False,
+			fit_kwargs=None,
+			load_checkpoint_mode: LoadCheckpointMode = None,
+	):
+		if fit_kwargs is None:
+			fit_kwargs = {}
+		if fit:
+			self.fit(dataloaders['train'], dataloaders['val'], **fit_kwargs)
+
+		if load_checkpoint_mode is not None:
+			self.load_checkpoint(load_checkpoint_mode)
+		return {key: self._compute_single_confusion_matrix(nb_classes, d) for key, d in dataloaders.items()}
+
+	def _compute_single_confusion_matrix(self, nb_classes: int, dataloader: DataLoader) -> np.ndarray:
+		self.eval()
+		confusion_matrix = np.zeros((nb_classes, nb_classes))
+		with torch.no_grad():
+			for i, (inputs, classes) in enumerate(dataloader):
+				inputs = inputs.to(self.device)
+				classes = classes.to(self.device)
+				outputs = self.get_prediction_proba(inputs, re_outputs_trace=False, re_hidden_states=False)
+				_, preds = torch.max(outputs, -1)
+				for t, p in zip(classes.view(-1), preds.view(-1)):
+					confusion_matrix[t.long(), p.long()] += 1
+		return confusion_matrix
