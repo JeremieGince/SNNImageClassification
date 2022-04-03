@@ -1,22 +1,19 @@
+import hashlib
 import itertools
 import logging
 import os
+import pickle
 import pprint
-from copy import deepcopy
 from typing import Any, Dict, List
 
 import pandas as pd
 import psutil
 import tqdm
-from pythonbasictools.device import log_pytorch_device_setup
-from pythonbasictools.logging import logs_file_setup
-import pickle
-import hashlib
 
 from src.datasets.datasets import DatasetId, get_dataloaders
 from src.modules.snn import LoadCheckpointMode, SNN
-from src.modules.spike_funcs import HeavisidePhiApprox, HeavisideSigmoidApprox, SpikeFuncType
-from src.modules.spiking_layers import ALIFLayer, LIFLayer, LayerType
+from src.modules.spike_funcs import SpikeFuncType
+from src.modules.spiking_layers import LayerType
 
 
 def get_training_params_space() -> Dict[str, Any]:
@@ -28,9 +25,9 @@ def get_training_params_space() -> Dict[str, Any]:
 		"dataset_id": [DatasetId.MNIST, DatasetId.FASHION_MNIST],
 		"to_spikes_use_periods": [True, False],
 		# "as_timeseries": [True, False],
-		"n_steps": [10, 100, 1_000, ],
+		# "n_steps": [100, 1_000, ],
 		"n_hidden_neurons": [100, 200, ],
-		"spike_func": [SpikeFuncType.FastSigmoid, SpikeFuncType.Phi],
+		"spike_func": [SpikeFuncType.FastSigmoid, ],
 		"hidden_layer_type": [LayerType.LIF, LayerType.ALIF, ],
 		"use_recurrent_connection": [False, True],
 	}
@@ -61,16 +58,16 @@ def save_params(params: Dict[str, Any], save_path: str):
 	pickle.dump(params, open(save_path, "wb"))
 
 
-def train_with_params(params: Dict[str, Any], verbose=False):
+def train_with_params(params: Dict[str, Any], data_folder="tr_data", verbose=False):
 	checkpoints_name = str(hash_params(params))
-	checkpoint_folder = f"tr_data/{checkpoints_name}"
+	checkpoint_folder = f"{data_folder}/{checkpoints_name}"
 	os.makedirs(checkpoint_folder, exist_ok=True)
 
 	dataloaders = get_dataloaders(
 		dataset_id=params["dataset_id"],
 		batch_size=256,
 		# as_timeseries=params["as_timeseries"],
-		n_steps=params["n_steps"],
+		# n_steps=params["n_steps"],
 		to_spikes_use_periods=params["to_spikes_use_periods"],
 		nb_workers=psutil.cpu_count(logical=False),
 	)
@@ -78,7 +75,7 @@ def train_with_params(params: Dict[str, Any], verbose=False):
 		inputs_size=28 * 28,
 		output_size=10,
 		n_hidden_neurons=params["n_hidden_neurons"],
-		int_time_steps=params["n_steps"],
+		# int_time_steps=params["n_steps"],
 		spike_func=params["spike_func"],
 		hidden_layer_type=params["hidden_layer_type"],
 		use_recurrent_connection=params["use_recurrent_connection"],
@@ -117,14 +114,16 @@ def get_all_params_combinations(params_space: Dict[str, Any] = None) -> List[Dic
 	return all_params_combinaison_dict
 
 
-def train_all_params(training_params: Dict[str, Any] = None):
+def train_all_params(training_params: Dict[str, Any] = None, data_folder: str = "tr_data", verbose=False):
 	"""
 	Train the network with all the parameters.
+	:param verbose:
+	:param data_folder:
 	:param training_params:
 	:return:
 	"""
-	os.makedirs("tr_data", exist_ok=True)
-	results_path = os.path.join("tr_data", "all_params_results.csv")
+	os.makedirs(data_folder, exist_ok=True)
+	results_path = os.path.join(data_folder, "results.csv")
 	if training_params is None:
 		training_params = get_training_params_space()
 
@@ -138,28 +137,25 @@ def train_all_params(training_params: Dict[str, Any] = None):
 		df = pd.DataFrame(columns=columns)
 
 	p_bar = tqdm.tqdm(all_params_combinaison_dict, desc="Training all the parameters")
-	# train all the parameters
 	for params in p_bar:
-		params_name = hash_params(params)
-		if params_name in df["checkpoints"].values:
-			p_bar.update(1)
+		if str(hash_params(params)) in df["checkpoints"].values:
+			p_bar.update()
 			continue
-		p_bar.set_description(f"Training {pprint.pformat(params, indent=4)}")
+		# p_bar.set_description(f"Training {params}")
 		try:
-			result = train_with_params(params, verbose=False)
-			df = df.append(
+			result = train_with_params(params, data_folder=data_folder, verbose=verbose)
+			df = pd.concat([df, pd.DataFrame(
 				dict(
-					checkpoints=result["checkpoints_name"],
-					**params,
-					train_accuracy=result["accuracies"]["train"],
-					val_accuracy=result["accuracies"]["val"],
-					test_accuracy=result["accuracies"]["test"],
-				),
-				ignore_index=True,
+					checkpoints=[result["checkpoints_name"]],
+					**{k: [v] for k, v in params.items()},
+					train_accuracy=[result["accuracies"]["train"]],
+					val_accuracy=[result["accuracies"]["val"]],
+					test_accuracy=[result["accuracies"]["test"]],
+				))],  ignore_index=True,
 			)
 			df.to_csv(results_path)
 			p_bar.set_postfix(
-				params=pprint.pformat(params, indent=4),
+				params=params,
 				train_accuracy=result["accuracies"]['train'],
 				val_accuracy=result["accuracies"]['val'],
 				test_accuracy=result["accuracies"]['test']
@@ -168,5 +164,7 @@ def train_all_params(training_params: Dict[str, Any] = None):
 			logging.error(e)
 			continue
 	p_bar.close()
+	return df
+
 
 
