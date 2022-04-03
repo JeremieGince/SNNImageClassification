@@ -26,7 +26,7 @@ def get_training_params_space() -> Dict[str, Any]:
 		"to_spikes_use_periods": [True, False],
 		# "as_timeseries": [True, False],
 		# "n_steps": [100, 1_000, ],
-		"n_hidden_neurons": [100, 200, ],
+		"n_hidden_neurons": [100, ],
 		"spike_func": [SpikeFuncType.FastSigmoid, ],
 		"hidden_layer_type": [LayerType.LIF, LayerType.ALIF, ],
 		"use_recurrent_connection": [False, True],
