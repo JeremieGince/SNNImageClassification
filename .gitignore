@@ -286,3 +286,4 @@ src/datasets/mnist/MNIST/raw/t10k-images-idx3-ubyte.gz
 src/datasets/mnist/MNIST/raw/t10k-images-idx3-ubyte
 checkpoints*
 tr_data
+spk_tr_data
