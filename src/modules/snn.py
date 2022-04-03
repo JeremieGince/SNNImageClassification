@@ -273,6 +273,14 @@ class SNN(torch.nn.Module):
 				counts.extend(traces[-1].sum(dim=(0, 1)).tolist())
 		return torch.tensor(counts, dtype=torch.float32, device=self.device)
 
+	def _check_early_stopping(self, patience: int, tol: float = 1e-2) -> bool:
+		"""
+		:param patience:
+		:return:
+		"""
+		losses = self.loss_history['val'][-patience:]
+		return np.all(np.abs(np.diff(losses)) < tol)
+
 	def fit(
 			self,
 			train_dataloader: DataLoader,
@@ -284,6 +292,8 @@ class SNN(torch.nn.Module):
 			load_checkpoint_mode: LoadCheckpointMode = None,
 			log_func=print,
 			force_overwrite: bool = False,
+			early_stopping: bool = False,
+			early_stopping_patience: int = 5,
 			verbose: bool = True,
 	):
 		if criterion is None:
@@ -331,6 +341,10 @@ class SNN(torch.nn.Module):
 					suffix=f"train_loss: {epoch_loss['train']:.5e}, val_loss: {epoch_loss['val']:.5e}",
 					log_func=log_func
 				)
+			if early_stopping and self._check_early_stopping(early_stopping_patience):
+				if verbose:
+					logging.info(f"Early stopping stopped the training at epoch {epoch}.")
+				break
 		self.plot_loss_history(show=False)
 		return self.loss_history
 
