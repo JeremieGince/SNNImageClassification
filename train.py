@@ -65,16 +65,15 @@ if __name__ == '__main__':
 	# logging.info(f"Training accuracy: {train_acc:.3f}")
 	# logging.info(f"Test accuracy: {test_acc:.3f}")
 	train_all_params()
-	# _, accs = train_with_params(
+	# results = train_with_params(
 	# 	{
-	# 		"dataset_id": DatasetId.MNIST,
-	# 		"to_spikes_use_periods": True,
-	# 		"n_steps": 10,
+	# 		"dataset_id": DatasetId.FASHION_MNIST,
+	# 		"to_spikes_use_periods": False,
 	# 		"n_hidden_neurons": 100,
-	# 		"spike_func": SpikeFuncType.FastSigmoid,
-	# 		"hidden_layer_type": LayerType.LIF,
+	# 		"spike_func": SpikeFuncType.Phi,
+	# 		"hidden_layer_type": LayerType.Izhikevich,
 	# 		"use_recurrent_connection": False,
 	# 	},
 	# 	verbose=True,
 	# )
-	# pprint.pprint(accs, indent=4)
+	# pprint.pprint(results["accuracies"], indent=4)
