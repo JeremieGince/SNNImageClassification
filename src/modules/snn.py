@@ -95,7 +95,6 @@ class SNN(torch.nn.Module):
 		self.layers = nn.ModuleDict()
 		self._add_layers_()
 		self.initialize_weights_()
-
 		self.loss_history = LossHistory()
 
 	@property
@@ -279,7 +278,7 @@ class SNN(torch.nn.Module):
 			train_dataloader: DataLoader,
 			val_dataloader: DataLoader,
 			lr=1e-3,
-			nb_epochs=30,
+			nb_epochs=15,
 			criterion=None,
 			optimizer=None,
 			load_checkpoint_mode: LoadCheckpointMode = None,
@@ -375,15 +374,18 @@ class SNN(torch.nn.Module):
 			optimizer,
 	):
 		if self.training:
-			log_p_y, out, h_sates = self.get_prediction_log_proba(x_batch, re_outputs_trace=True, re_hidden_states=True)
+			log_p_y, out, h_sates = self.get_prediction_log_proba(
+				x_batch, re_outputs_trace=True, re_hidden_states=True
+			)
 		else:
 			with torch.no_grad():
 				log_p_y, out, h_sates = self.get_prediction_log_proba(
 					x_batch, re_outputs_trace=True, re_hidden_states=True
 				)
 
+		# TODO: add regularization loss
 		# reg_loss = torch.mean(self.get_spikes_count_per_neuron(h_sates))
-		# spikes = [h[-1] for l_name, h_list in h_sates.items() for h in h_list if l_name.lower() != "readout"]  # TODO: create a get_spikes method
+		# spikes = [h[-1] for l_name, h_list in h_sates.items() for h in h_list if l_name.lower() != "readout"]
 		# reg_loss = 1e-5 * sum([torch.sum(s) for s in spikes])  # L1 loss on total number of spikes
 		# reg_loss = 1e-5 * sum(
 		# 	[torch.mean(torch.sum(torch.sum(s, dim=0), dim=0) ** 2) for s in spikes]
@@ -391,7 +393,6 @@ class SNN(torch.nn.Module):
 		# reg_loss = torch.mean(self.get_spikes_count_per_neuron(h_sates) ** 2)
 
 		batch_loss = criterion(log_p_y, y_batch.long().to(self.device))
-
 		if self.training:
 			optimizer.zero_grad()
 			batch_loss.backward()
@@ -434,15 +435,15 @@ class SNN(torch.nn.Module):
 
 	@staticmethod
 	def get_save_path_from_checkpoints(
-			checkpoints_meta: Dict[str, Union[str, Dict[int, str]]],
+			checkpoints_meta: Dict[str, Union[str, Dict[Any, str]]],
 			load_checkpoint_mode: LoadCheckpointMode = LoadCheckpointMode.BEST_EPOCH
 	) -> str:
 		if load_checkpoint_mode == load_checkpoint_mode.BEST_EPOCH:
 			return checkpoints_meta[SNN.CHECKPOINT_BEST_KEY]
 		elif load_checkpoint_mode == load_checkpoint_mode.LAST_EPOCH:
 			epochs_dict = checkpoints_meta[SNN.CHECKPOINT_EPOCHS_KEY]
-			last_epoch: int = max(epochs_dict)
-			return checkpoints_meta[SNN.CHECKPOINT_EPOCHS_KEY][last_epoch]
+			last_epoch: int = max([int(e) for e in epochs_dict])
+			return checkpoints_meta[SNN.CHECKPOINT_EPOCHS_KEY][str(last_epoch)]
 		else:
 			raise ValueError()
 
@@ -496,10 +497,10 @@ class SNN(torch.nn.Module):
 			for i, (inputs, classes) in enumerate(dataloader):
 				inputs = inputs.to(self.device)
 				classes = classes.to(self.device)
-				outputs = self.get_prediction_proba(inputs, re_outputs_trace=False, re_hidden_states=False)
+				outputs = self.get_prediction_logits(inputs, re_outputs_trace=False, re_hidden_states=False)
 				_, preds = torch.max(outputs, -1)
-				accs.append(torch.mean((preds == classes).float()).detach().cpu().item())
-		return np.mean(accs)
+				accs.extend(torch.eq(preds, classes).float().cpu().numpy())
+		return np.mean(np.asarray(accs)).item()
 
 	def compute_confusion_matrix(
 			self,
@@ -525,7 +526,7 @@ class SNN(torch.nn.Module):
 			for i, (inputs, classes) in enumerate(dataloader):
 				inputs = inputs.to(self.device)
 				classes = classes.to(self.device)
-				outputs = self.get_prediction_proba(inputs, re_outputs_trace=False, re_hidden_states=False)
+				outputs = self.get_prediction_logits(inputs, re_outputs_trace=False, re_hidden_states=False)
 				_, preds = torch.max(outputs, -1)
 				for t, p in zip(classes.view(-1), preds.view(-1)):
 					confusion_matrix[t.long(), p.long()] += 1
