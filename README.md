@@ -2,11 +2,11 @@
  
 # Citation
 ```
-@article{GinceLamontagneCaronSNNImgClassification,
+@article{Gince_LamontagneCaron_SNNImgClassification_2022,
   title={SNN Image Classification},
-  author={Jérémie Gince, Rémi Lamontagne-Caron},
+  author={Gince, Jérémie and Lamontagne-Caron, Rémi},
   year={2022},
-  publisher={ULaval},
+  publisher={Université Laval},
   url={https://github.com/JeremieGince/SNNImageClassification},
 }
 ```
