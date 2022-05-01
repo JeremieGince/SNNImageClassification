@@ -1,0 +1,8 @@
+matplotlib==3.5.1
+numpy==1.22.2
+pandas==1.4.0
+psutil==5.9.0
+git+https://github.com/JeremieGince/PythonBasicTools
+seaborn==0.11.2
+torchvision==0.11.3+cu113
+tqdm==4.62.3
