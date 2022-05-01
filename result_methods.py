@@ -8,23 +8,23 @@ import numpy as np
 plot_layout = dict(
 	paper_bgcolor='rgb(243, 243, 243)',
 	plot_bgcolor='rgb(243, 243, 243)',
-	legend=dict(font_size=28, borderwidth=3, ),
+	legend=dict(font_size=35, borderwidth=3, ),
 	xaxis=dict(
 		tickfont_size=28,
 		zeroline=False,
 		showgrid=False,
 		title_font_size=24,
 		showline=True,
-		linewidth=2,
+		linewidth=4,
 		linecolor='black',
 	),
 	yaxis=dict(
 		showgrid=False,
-		tickfont_size=28,
+		tickfont_size=42,
 		zeroline=False,
-		title_font_size=28,
+		title_font_size=40,
 		showline=True,
-		linewidth=2,
+		linewidth=4,
 		linecolor='black',
 	)
 )
@@ -69,7 +69,7 @@ def _plot_bar_result(figure: go.Figure, results: pd.DataFrame, dataset: str, y_a
 		text=list(map(lambda a: round(a, 2), y_data)),
 		textposition='auto',
 		textangle=90,
-		textfont_size=24,
+		textfont_size=32,
 		**kwargs
 	)
 	)
@@ -89,7 +89,6 @@ def plot_bar_result(results: pd.DataFrame, dataset_name: str, list_col_names: li
 	figure.update_layout(
 		barmode='group',
 		legend=dict(
-			font_size=28,
 			x=0.98,
 			y=0.95,
 			xanchor='right',
@@ -100,18 +99,12 @@ def plot_bar_result(results: pd.DataFrame, dataset_name: str, list_col_names: li
 		uniformtext=dict(mode="hide", minsize=18),
 	)
 	figure.update_xaxes(
-		showline=True,
-		linewidth=3,
-		linecolor='black',
 		ticks="outside",
 		tickwidth=4,
 		tickcolor='black'
 	)
 	figure.update_yaxes(
 		title=dict(text='Accuracy [%]'),
-		showline=True,
-		linewidth=2,
-		linecolor='black',
 		range=[0, 100],
 	)
 	return figure
@@ -165,7 +158,7 @@ def box_plot_accuracy(results: pd.DataFrame, dataset_name: str):
 		ticks="outside",
 		tickwidth=4,
 		tickcolor='black',
-		tickfont_size=26,
+		tickfont_size=38,
 
 	)
 	figure.update_yaxes(
@@ -224,18 +217,23 @@ def pairwise_comparison(results: pd.DataFrame, dataset_name: str):
 			marker_color='crimson',
 		)
 	)
+	fig.update_layout(plot_layout)
+	fig.update_xaxes(
+		tickfont_size=38,
+	)
 	fig.update_yaxes(
 		title=dict(text='Différence couplée moyenne'),
+		range=[0, 0.45],
 	)
-	fig.update_layout(plot_layout)
 	return fig
 
 
 if __name__ == '__main__':
 	result = load_results()
-	# make_data_for_box_plot(result, 'MNIST', 'test_accuracy').show()
 	# box_plot_accuracy(result, 'MNIST').show()
+	# box_plot_accuracy(result, 'FASHION_MNIST').show()
+	# plot_bar_result(result, 'MNIST', ['test_accuracy', 'val_accuracy']).show()
 	# plot_bar_result(result, 'FASHION_MNIST', ['test_accuracy', 'val_accuracy']).show()
 	# print(statistical_analysis_model(result, 'FASHION_MNIST').summary())
-	# pairwise_comparison(result, 'MNIST').show()
+	pairwise_comparison(result, 'MNIST').show()
 	pairwise_comparison(result, 'FASHION_MNIST').show()
