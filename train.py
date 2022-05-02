@@ -64,15 +64,17 @@ if __name__ == '__main__':
 	# test_acc = snn.compute_classification_accuracy(dataloaders["test"])
 	# logging.info(f"Training accuracy: {train_acc:.3f}")
 	# logging.info(f"Test accuracy: {test_acc:.3f}")
-	train_all_params()
+	train_all_params(data_folder="tr_results")
 	# results = train_with_params(
 	# 	{
 	# 		"dataset_id": DatasetId.FASHION_MNIST,
 	# 		"to_spikes_use_periods": False,
-	# 		"n_hidden_neurons": 100,
-	# 		"spike_func": SpikeFuncType.Phi,
-	# 		"hidden_layer_type": LayerType.Izhikevich,
-	# 		"use_recurrent_connection": False,
+	# 		"n_hidden_neurons": 128,
+	# 		"spike_func": SpikeFuncType.FastSigmoid,
+	# 		"hidden_layer_type": LayerType.ALIF,
+	# 		"use_recurrent_connection": True,
+	# 		"learn_beta": True,
+	# 		"nb_epochs": 30,
 	# 	},
 	# 	verbose=True,
 	# )

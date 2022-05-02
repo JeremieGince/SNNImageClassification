@@ -22,14 +22,40 @@ def get_training_params_space() -> Dict[str, Any]:
 	:return:
 	"""
 	return {
-		"dataset_id": [DatasetId.MNIST, DatasetId.FASHION_MNIST],
-		"to_spikes_use_periods": [True, False],
+		"dataset_id": [
+			# DatasetId.MNIST,
+			DatasetId.FASHION_MNIST
+		],
+		"to_spikes_use_periods": [
+			True,
+			False
+		],
 		# "as_timeseries": [True, False],
 		# "n_steps": [100, 1_000, ],
-		"n_hidden_neurons": [100, ],
+		"n_hidden_neurons": [
+			# 64,
+			# [64, 64],
+			128,
+			# [32, 32],
+			# 32
+		],
 		"spike_func": [SpikeFuncType.FastSigmoid, ],
-		"hidden_layer_type": [LayerType.LIF, LayerType.ALIF, ],
-		"use_recurrent_connection": [False, True],
+		"hidden_layer_type": [
+			# LayerType.LIF,
+			LayerType.ALIF,
+		],
+		"use_recurrent_connection": [
+			False,
+			True
+		],
+		"learn_beta": [
+			True,
+			False
+		],
+		"nb_epochs": [
+			# 15,
+			30,
+		],
 	}
 
 
@@ -58,7 +84,7 @@ def save_params(params: Dict[str, Any], save_path: str):
 	pickle.dump(params, open(save_path, "wb"))
 
 
-def train_with_params(params: Dict[str, Any], data_folder="tr_data", verbose=False):
+def train_with_params(params: Dict[str, Any], data_folder="tr_results", verbose=False):
 	checkpoints_name = str(hash_params(params))
 	checkpoint_folder = f"{data_folder}/{checkpoints_name}"
 	os.makedirs(checkpoint_folder, exist_ok=True)
@@ -80,6 +106,7 @@ def train_with_params(params: Dict[str, Any], data_folder="tr_data", verbose=Fal
 		hidden_layer_type=params["hidden_layer_type"],
 		use_recurrent_connection=params["use_recurrent_connection"],
 		checkpoint_folder=checkpoint_folder,
+		learn_beta=params.get("learn_beta", False),
 	)
 	save_params(params, os.path.join(checkpoint_folder, "params.pkl"))
 	# x_viz, _ = next(iter(dataloaders["train"]))
@@ -89,6 +116,7 @@ def train_with_params(params: Dict[str, Any], data_folder="tr_data", verbose=Fal
 	network.fit(
 		dataloaders["train"],
 		dataloaders["val"],
+		nb_epochs=params.get("nb_epochs", 15),
 		load_checkpoint_mode=LoadCheckpointMode.LAST_EPOCH,
 		force_overwrite=True,
 		verbose=verbose,
@@ -139,7 +167,6 @@ def train_all_params(training_params: Dict[str, Any] = None, data_folder: str = 
 	p_bar = tqdm.tqdm(all_params_combinaison_dict, desc="Training all the parameters")
 	for params in p_bar:
 		if str(hash_params(params)) in df["checkpoints"].values:
-			p_bar.update()
 			continue
 		# p_bar.set_description(f"Training {params}")
 		try:

@@ -299,7 +299,7 @@ class SNN(torch.nn.Module):
 		if criterion is None:
 			criterion = nn.NLLLoss()
 		if optimizer is None:
-			optimizer = torch.optim.Adam(self.parameters(), lr=lr)
+			optimizer = torch.optim.Adam(self.parameters(), lr=lr, weight_decay=1e-5)
 
 		start_epoch = 0
 		if load_checkpoint_mode is None:

@@ -1,8 +1,8 @@
 import plotly.graph_objects as go
 import pandas as pd
 import seaborn as sns
-import statsmodels.api as sm
-from tabulate import tabulate
+# import statsmodels.api as sm
+# from tabulate import tabulate
 import numpy as np
 
 plot_layout = dict(
@@ -179,10 +179,10 @@ def make_data_for_stat(results: pd.DataFrame, dataset_name: str, ydata: str):
 	return stat_data, y_data.tolist()
 
 
-def statistical_analysis_model(results: pd.DataFrame, dataset_name: str):
-	X, Y = make_data_for_stat(results, dataset_name, 'test_accuracy')
-	X2 = sm.add_constant(X)
-	return sm.OLS(Y, X2).fit()
+# def statistical_analysis_model(results: pd.DataFrame, dataset_name: str):
+# 	X, Y = make_data_for_stat(results, dataset_name, 'test_accuracy')
+# 	X2 = sm.add_constant(X)
+# 	return sm.OLS(Y, X2).fit()
 
 
 def make_pairwise_data(results: pd.DataFrame, dataset_name: str, param_name: str,ydata_name: str):
@@ -229,11 +229,11 @@ def pairwise_comparison(results: pd.DataFrame, dataset_name: str):
 
 
 if __name__ == '__main__':
-	result = load_results()
+	result = load_results('tr_results/results.csv')
 	# box_plot_accuracy(result, 'MNIST').show()
 	# box_plot_accuracy(result, 'FASHION_MNIST').show()
-	# plot_bar_result(result, 'MNIST', ['test_accuracy', 'val_accuracy']).show()
+	plot_bar_result(result, 'MNIST', ['test_accuracy']).show()
 	# plot_bar_result(result, 'FASHION_MNIST', ['test_accuracy', 'val_accuracy']).show()
 	# print(statistical_analysis_model(result, 'FASHION_MNIST').summary())
-	pairwise_comparison(result, 'MNIST').show()
-	pairwise_comparison(result, 'FASHION_MNIST').show()
+	# pairwise_comparison(result, 'MNIST').show()
+	# pairwise_comparison(result, 'FASHION_MNIST').show()

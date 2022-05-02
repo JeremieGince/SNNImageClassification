@@ -194,6 +194,8 @@ class ALIFLayer(LIFLayer):
 			**kwargs
 		)
 		self.beta = torch.tensor(self.kwargs["beta"], dtype=torch.float32, device=self.device)
+		if kwargs["learn_beta"]:
+			self.beta = torch.nn.Parameter(self.beta, requires_grad=True)
 		self.rho = torch.tensor(np.exp(-dt / self.kwargs["tau_a"]), dtype=torch.float32, device=self.device)
 
 	def _set_default_kwargs(self):
@@ -205,6 +207,7 @@ class ALIFLayer(LIFLayer):
 			self.kwargs.setdefault("gamma", 100.0)
 		else:
 			self.kwargs.setdefault("gamma", 0.3)
+		self.kwargs.setdefault("learn_beta", False)
 
 	def create_empty_state(self, batch_size: int = 1) -> Tuple[torch.Tensor, ...]:
 		"""
@@ -233,7 +236,7 @@ class ALIFLayer(LIFLayer):
 		else:
 			rec_current = 0.0
 		# v_j^{t+1} = \alpha * v_j^t + \sum_i W_{ji}*z_i^t + \sum_i W_{ji}^{in}x_i^{t+1} - z_j^t * v_{th}
-		next_V = (self.beta * V + input_current + rec_current) * (1.0 - Z.detach())
+		next_V = (self.alpha * V + input_current + rec_current) * (1.0 - Z.detach())
 		next_a = self.rho * a + Z  # a^{t+1} = \rho * a_j^t + z_j^t
 		A = self.threshold + self.beta * next_a  # A_j^t = v_{th} + \beta * a_j^t
 		next_Z = self.spike_func.apply(next_V, A, self.gamma)  # z_j^t = H(v_j^t - A_j^t)
