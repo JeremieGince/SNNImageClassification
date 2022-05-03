@@ -126,6 +126,20 @@ if __name__ == '__main__':
 	)
 	pprint.pprint(results, indent=4)
 ```
+The output of the previous code:
+```
+ |####################################################################################################| 30/30, [00:39:33<00:00:00, 0itr/s] 100% train_loss: 1.88297e-01, val_loss: 2.78507e-01
+{   'accuracies': {   'test': 0.9366999864578247,
+                      'train': 0.9565490484237671,
+                      'val': 0.9359999895095825},
+    'checkpoints_name': '285720764938101059982133148144568371179',
+    'network': SNN(
+  (layers): ModuleDict(
+    (input): ALIFLayer()
+    (readout): ReadoutLayer()
+  )
+)}
+```
 
 
 
