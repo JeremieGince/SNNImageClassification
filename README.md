@@ -1,4 +1,4 @@
-# Classification of MNIST and Fashion-MNIST images using SNNs
+<center> <h1>Classification of MNIST and Fashion-MNIST images using SNNs</h1> </center>
  
 
 ## Abstract
