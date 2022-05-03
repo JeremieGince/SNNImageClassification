@@ -42,7 +42,11 @@ The results of the experiments are presented in the following figures.
 <p align="center"> <img width="1200" height="500" src="https://github.com/JeremieGince/SNNImageClassification/blob/main/figures/FMNIST_precision.png?raw=true"> </p>
 
 ### Legend
-
+- REC : recurrent connections flag;
+- P : periodical signal flag; 
+- H or HN : number of hidden neurons;
+- I : number of training iterations;
+- B : beta training flag.
 
 
 
