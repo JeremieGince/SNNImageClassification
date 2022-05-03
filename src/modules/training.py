@@ -23,8 +23,8 @@ def get_training_params_space() -> Dict[str, Any]:
 	"""
 	return {
 		"dataset_id": [
-			# DatasetId.MNIST,
-			DatasetId.FASHION_MNIST
+			DatasetId.MNIST,
+			# DatasetId.FASHION_MNIST
 		],
 		"to_spikes_use_periods": [
 			True,
@@ -33,9 +33,11 @@ def get_training_params_space() -> Dict[str, Any]:
 		# "as_timeseries": [True, False],
 		# "n_steps": [100, 1_000, ],
 		"n_hidden_neurons": [
+			16,
+			32,
 			# 64,
 			# [64, 64],
-			128,
+			# 128,
 			# [32, 32],
 			# 32
 		],
@@ -45,12 +47,12 @@ def get_training_params_space() -> Dict[str, Any]:
 			LayerType.ALIF,
 		],
 		"use_recurrent_connection": [
-			False,
+			# False,
 			True
 		],
 		"learn_beta": [
 			True,
-			False
+			# False
 		],
 		"nb_epochs": [
 			# 15,

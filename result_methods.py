@@ -10,7 +10,7 @@ plot_layout = dict(
 	plot_bgcolor='rgb(243, 243, 243)',
 	legend=dict(font_size=35, borderwidth=3, ),
 	xaxis=dict(
-		tickfont_size=28,
+		tickfont_size=32,
 		zeroline=False,
 		showgrid=False,
 		title_font_size=24,
@@ -33,7 +33,9 @@ dict_param_name = {
 	'hidden_layer_type': 'Dynamique',
 	"use_recurrent_connection": "Connections récurrentes",
 	"to_spikes_use_periods": 'Temps en période',
-	"n_hidden_neurons": 'Taille de la couche cachée'
+	"n_hidden_neurons": 'Taille de la couche cachée',
+	"nb_epochs": "Nombre d'itérations",
+	"learn_beta": "Apprentissage de Beta",
 }
 
 
@@ -44,24 +46,65 @@ def load_results(file_path='tr_data/results.csv') -> pd.DataFrame:
 	return pd.read_csv(file_path, index_col=0)
 
 
-def _plot_bar_result(figure: go.Figure, results: pd.DataFrame, dataset: str, y_axis: str, **kwargs):
+def _plot_bar_result(
+		figure: go.Figure,
+		results: pd.DataFrame,
+		dataset: str,
+		y_axis: str,
+		data_mask: tuple = None,
+		list_col_names=['hidden_layer_type', 'use_recurrent_connection', 'to_spikes_use_periods', 'n_hidden_neurons',
+		                'nb_epochs', 'learn_beta'],
+		**kwargs):
 	"""
 	Plots a histogram of the given results.
 	"""
 	dataset_results = results[results['dataset_id'] == 'DatasetId.' + dataset]
+	col_names = list(dict_param_name.keys())
+	torem = list(set(col_names) - set(list_col_names))
+	for elem in torem:
+		col_names.remove(elem)
+	# if hide_col is not None:
+	# 	if type(hide_col) is list:
+	# 		for col in hide_col:
+	# 			col_names.remove(col)
+	# 	else:
+	# 		col_names.remove(hide_col)
 	dataset_results = dataset_results.sort_values(
-		by=['hidden_layer_type', "use_recurrent_connection", "to_spikes_use_periods", "n_hidden_neurons"],
+		by=col_names,
+		# ['hidden_layer_type', "use_recurrent_connection", "to_spikes_use_periods", "n_hidden_neurons"],
 		ignore_index=True)
-	y_data = dataset_results[y_axis]*100
-	y_data = y_data.tolist()
-	xlabel = [
-		f'{dataset_results.loc[i, "hidden_layer_type"].split(".")[-1]}<br>'
-		f'REC {"[✓]" if dataset_results.loc[i, "use_recurrent_connection"] else "[X]"}<br>'
-		f'P {"[✓]" if dataset_results.loc[i, "to_spikes_use_periods"] else "[X]"}<br>'
-		f'HN:{dataset_results.loc[i, "n_hidden_neurons"]}<br>'
-		for i in range(dataset_results.shape[0])
+	if data_mask is not None:
+		dataset_results = dataset_results[dataset_results[data_mask[0]] == data_mask[1]]
 
-	]
+	y_data = dataset_results[y_axis] * 100
+	y_data = y_data.tolist()
+	xlabel = []
+	dict_param_surname = dict(
+		hidden_layer_type='',
+		use_recurrent_connection='R ',
+		to_spikes_use_periods='P ',
+		n_hidden_neurons='H ',
+		nb_epochs='I ',
+		learn_beta='B ',
+	)
+	for i in range(dataset_results.shape[0]):
+		label = ''
+		for col in list_col_names:
+			try:
+				surname = dict_param_surname[col]
+			except KeyError:
+				print(f'{col} is not a valid parameter name.')
+				continue
+			try:
+				if dataset_results.loc[i, col] in [True, False]:
+					label += f'{surname}{"[✓]" if dataset_results.loc[i, col] == True else "[X]"}<br>'
+				else:
+					label += f'{surname}{str(dataset_results.loc[i, col]).split(".")[-1]}<br>'
+			except KeyError:
+				print(f'{col} not in dataset_results[{i}|{col}]')
+				continue
+		xlabel.append(label)
+
 	figure.add_trace(go.Bar(
 		y=y_data,
 		x=xlabel,
@@ -76,7 +119,15 @@ def _plot_bar_result(figure: go.Figure, results: pd.DataFrame, dataset: str, y_a
 	return figure
 
 
-def plot_bar_result(results: pd.DataFrame, dataset_name: str, list_col_names: list):
+def plot_bar_result(
+		results: pd.DataFrame,
+		dataset_name: str,
+		list_col_names: list,
+		data_mask: tuple = None,
+		list_col_names_xaxis=['hidden_layer_type', 'use_recurrent_connection', 'to_spikes_use_periods',
+		                      'n_hidden_neurons',
+		                      'nb_epochs', 'learn_beta'],
+):
 	"""
 	Plots a histogram of the given results.
 	"""
@@ -84,7 +135,15 @@ def plot_bar_result(results: pd.DataFrame, dataset_name: str, list_col_names: li
 	palette = sns.color_palette("rocket", len(list_col_names))
 	for i, y_axis in enumerate(list_col_names):
 		color = f'rgb{tuple(map(lambda a: int(a * 255), palette[i]))}'
-		figure = _plot_bar_result(figure, results, dataset_name, y_axis, marker_color=color)
+		figure = _plot_bar_result(
+			figure,
+			results,
+			dataset_name,
+			y_axis,
+			data_mask,
+			list_col_names_xaxis,
+			marker_color=color
+		)
 	figure.update_layout(plot_layout)
 	figure.update_layout(
 		barmode='group',
@@ -115,7 +174,7 @@ def make_data_for_box_plot(results: pd.DataFrame, dataset_name: str, ydata: str)
 	Returns the data for the box plot.
 	"""
 	dataset_results = results[results['dataset_id'] == 'DatasetId.' + dataset_name]
-	y_data = dataset_results[ydata]*100
+	y_data = dataset_results[ydata] * 100
 	box_plot_data = pd.DataFrame()
 	for param in dict_param_name.keys():
 		for param_value in dataset_results[param].unique():
@@ -149,8 +208,8 @@ def box_plot_accuracy(results: pd.DataFrame, dataset_name: str):
 				marker=dict(
 					color=color,
 					size=12
-					),
-				legendgroup=f'{Legendg[i//2]}',
+				),
+				legendgroup=f'{Legendg[i // 2]}',
 			)
 		)
 	figure.update_layout(plot_layout)
@@ -172,7 +231,8 @@ def make_data_for_stat(results: pd.DataFrame, dataset_name: str, ydata: str):
 	dataset_results = results[results['dataset_id'] == 'DatasetId.' + dataset_name]
 	y_data = dataset_results[ydata]
 	stat_data = pd.DataFrame()
-	stat_data['to_spikes_use_periods'] = dataset_results['to_spikes_use_periods'].map({True: 1, False: 0}) #If True replace by 1, else replace by 0
+	stat_data['to_spikes_use_periods'] = dataset_results['to_spikes_use_periods'].map(
+		{True: 1, False: 0})  # If True replace by 1, else replace by 0
 	stat_data['hidden_layer_type'] = dataset_results['hidden_layer_type'].map({'LayerType.LIF': 0, 'LayerType.ALIF': 1})
 	stat_data['use_recurrent_connection'] = dataset_results['use_recurrent_connection'].map({True: 1, False: 0})
 	stat_data['n_hidden_neurons'] = dataset_results['n_hidden_neurons'].map({100: 0, 200: 1})
@@ -185,7 +245,7 @@ def make_data_for_stat(results: pd.DataFrame, dataset_name: str, ydata: str):
 # 	return sm.OLS(Y, X2).fit()
 
 
-def make_pairwise_data(results: pd.DataFrame, dataset_name: str, param_name: str,ydata_name: str):
+def make_pairwise_data(results: pd.DataFrame, dataset_name: str, param_name: str, ydata_name: str):
 	dataset_results = results[results['dataset_id'] == 'DatasetId.' + dataset_name]
 	list_params = list(dict_param_name.keys())
 	list_params.remove(param_name)
@@ -200,7 +260,7 @@ def make_pairwise_data(results: pd.DataFrame, dataset_name: str, param_name: str
 	return pairwise_data.iloc[:, [-2, -1]]
 
 
-def pairwise_comparison(results: pd.DataFrame, dataset_name: str):
+def pairwise_comparison(results: pd.DataFrame, dataset_name: str, ymax: float):
 	list_params = list(dict_param_name.keys())
 	list_mean = []
 	list_std = []
@@ -208,11 +268,11 @@ def pairwise_comparison(results: pd.DataFrame, dataset_name: str):
 		pairwise_data = make_pairwise_data(results, dataset_name, param_name, 'test_accuracy')
 		diff = pairwise_data.diff(axis=1).iloc[:, -1].to_numpy()
 		list_mean.append(np.abs(np.mean(diff)))
-		list_std.append(np.std(diff)/3)
+		list_std.append(np.std(diff) / 3)
 	fig = go.Figure()
 	fig.add_trace(
 		go.Bar(
-			x=list(map(lambda a: dict_param_name[a],list_params)),
+			x=list(map(lambda a: dict_param_name[a], list_params)),
 			y=list_mean,
 			marker_color='crimson',
 		)
@@ -223,17 +283,30 @@ def pairwise_comparison(results: pd.DataFrame, dataset_name: str):
 	)
 	fig.update_yaxes(
 		title=dict(text='Différence couplée moyenne'),
-		range=[0, 0.45],
+		range=[0, ymax],
 	)
 	return fig
 
 
 if __name__ == '__main__':
 	result = load_results('tr_results/results.csv')
+	result = result[result['n_hidden_neurons'].isin(['128'])]
+	# result = result.drop(columns=['hidden_layer_type'])
 	# box_plot_accuracy(result, 'MNIST').show()
 	# box_plot_accuracy(result, 'FASHION_MNIST').show()
-	plot_bar_result(result, 'MNIST', ['test_accuracy']).show()
+	plot_bar_result(
+		result,
+		'MNIST',
+		['test_accuracy'],
+		list_col_names_xaxis=[
+			'use_recurrent_connection',
+			'to_spikes_use_periods',
+			'n_hidden_neurons',
+			'nb_epochs',
+			'learn_beta'
+		]
+	).show()
 	# plot_bar_result(result, 'FASHION_MNIST', ['test_accuracy', 'val_accuracy']).show()
 	# print(statistical_analysis_model(result, 'FASHION_MNIST').summary())
-	# pairwise_comparison(result, 'MNIST').show()
+	# pairwise_comparison(result, 'MNIST',ymax=0.35).show()
 	# pairwise_comparison(result, 'FASHION_MNIST').show()
