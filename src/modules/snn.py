@@ -3,15 +3,11 @@ import json
 import logging
 import os
 import shutil
-import time
-from copy import deepcopy
-from typing import Any, Dict, Iterable, List, Tuple, Type, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Type, Union
 
-import matplotlib.pyplot as plt
 import numpy as np
-import psutil
 import torch
-from pythonbasictools.progress_bar import printProgressBar
+from tqdm.auto import tqdm
 from torch import Tensor, nn
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
@@ -290,11 +286,12 @@ class SNN(torch.nn.Module):
 			criterion=None,
 			optimizer=None,
 			load_checkpoint_mode: LoadCheckpointMode = None,
-			log_func=print,
 			force_overwrite: bool = False,
 			early_stopping: bool = False,
 			early_stopping_patience: int = 5,
 			verbose: bool = True,
+			p_bar_position: Optional[int] = None,
+			p_bar_leave: Optional[bool] = None,
 	):
 		if criterion is None:
 			criterion = nn.NLLLoss()
@@ -317,34 +314,38 @@ class SNN(torch.nn.Module):
 				self.loss_history = self.get_checkpoints_loss_history()
 			except FileNotFoundError:
 				if verbose:
-					logging.warning("No such checkpoint. Fit from beginning.")
+					logging.warning("No such checkpoint. Fit from beginning.", UserWarning)
 
 		if start_epoch >= nb_epochs:
 			return self.loss_history
 
 		best_loss = self.loss_history.min('val')
-		start_time = time.time()
-		if verbose:
-			printProgressBar(start_epoch, nb_epochs, log_func=log_func)
-		for epoch in range(start_epoch, nb_epochs):
+		p_bar = tqdm(
+			range(start_epoch, nb_epochs),
+			desc="Training",
+			disable=not verbose,
+			position=p_bar_position,
+			unit="epoch",
+			leave=p_bar_leave
+		)
+		for epoch in p_bar:
 			epoch_loss = self._exec_phase(train_dataloader, val_dataloader, criterion, optimizer)
+			epoch_val_acc = self.compute_classification_accuracy(val_dataloader, verbose=False)
 			self.loss_history.concat(epoch_loss)
 			is_best = epoch_loss['val'] < best_loss
 			self.save_checkpoint(optimizer, epoch, epoch_loss, is_best)
 			if is_best:
 				best_loss = epoch_loss['val']
-			elapsed_time = time.time() - start_time
-			if verbose:
-				printProgressBar(
-					epoch + 1, nb_epochs,
-					current_elapse_seconds=elapsed_time,
-					suffix=f"train_loss: {epoch_loss['train']:.5e}, val_loss: {epoch_loss['val']:.5e}",
-					log_func=log_func
-				)
+			p_bar.set_postfix(
+				train_loss=f"{epoch_loss['train']:.5e}",
+				val_loss=f"{epoch_loss['val']:.5e}",
+				val_acc=f"{epoch_val_acc:.5f}",
+			)
 			if early_stopping and self._check_early_stopping(early_stopping_patience):
 				if verbose:
 					logging.info(f"Early stopping stopped the training at epoch {epoch}.")
 				break
+		p_bar.close()
 		self.plot_loss_history(show=False)
 		return self.loss_history
 
@@ -503,12 +504,19 @@ class SNN(torch.nn.Module):
 		with open(self.checkpoints_meta_path, "w+") as jsonFile:
 			json.dump(info, jsonFile, indent=4)
 
-	def compute_classification_accuracy(self, dataloader: DataLoader) -> float:
+	def compute_classification_accuracy(
+			self,
+			dataloader: DataLoader,
+			verbose: bool = False,
+			desc: Optional[str] = None,
+	) -> float:
 		""" Computes classification accuracy on supplied data in batches. """
 		self.eval()
 		accs = []
 		with torch.no_grad():
-			for i, (inputs, classes) in enumerate(dataloader):
+			for i, (inputs, classes) in tqdm(
+					enumerate(dataloader), total=len(dataloader), desc=desc, disable=not verbose
+			):
 				inputs = inputs.to(self.device)
 				classes = classes.to(self.device)
 				outputs = self.get_prediction_logits(inputs, re_outputs_trace=False, re_hidden_states=False)
