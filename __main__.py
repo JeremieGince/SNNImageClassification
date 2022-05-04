@@ -19,12 +19,15 @@ def train_with_params(params: Dict[str, Any], data_folder="tr_results", verbose=
 	dataloaders = get_dataloaders(
 		dataset_id=params["dataset_id"],
 		batch_size=256,
+		n_steps=params["n_steps"],
 		to_spikes_use_periods=params["to_spikes_use_periods"],
+		train_val_split_ratio=params.get("train_val_split_ratio", 0.85),
 		nb_workers=psutil.cpu_count(logical=False),
 	)
 	network = SNN(
 		inputs_size=28 * 28,
 		output_size=10,
+		int_time_steps=params["n_steps"],
 		n_hidden_neurons=params["n_hidden_neurons"],
 		spike_func=params["spike_func"],
 		hidden_layer_type=params["hidden_layer_type"],
@@ -44,7 +47,10 @@ def train_with_params(params: Dict[str, Any], data_folder="tr_results", verbose=
 	network.load_checkpoint(LoadCheckpointMode.BEST_EPOCH)
 	return dict(
 		network=network,
-		accuracies={k: network.compute_classification_accuracy(dataloaders[k]) for k in dataloaders},
+		accuracies={
+			k: network.compute_classification_accuracy(dataloaders[k], verbose=True, desc=k)
+			for k in dataloaders
+		},
 		checkpoints_name=checkpoints_name,
 	)
 
@@ -53,13 +59,15 @@ if __name__ == '__main__':
 	results = train_with_params(
 		{
 			"dataset_id": DatasetId.MNIST,
-			"to_spikes_use_periods": True,
+			"to_spikes_use_periods": False,
 			"n_hidden_neurons": 128,
 			"spike_func": SpikeFuncType.FastSigmoid,
 			"hidden_layer_type": LayerType.ALIF,
 			"use_recurrent_connection": True,
-			"learn_beta": True,
+			# "learn_beta": True,
 			"nb_epochs": 30,
+			"n_steps": 2,
+			"train_val_split_ratio": 0.95,
 		},
 		verbose=True,
 	)
