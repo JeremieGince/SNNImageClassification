@@ -4,6 +4,7 @@ import logging
 import os
 import pickle
 import pprint
+import warnings
 from typing import Any, Dict, List
 
 import pandas as pd
@@ -31,13 +32,13 @@ def get_training_params_space() -> Dict[str, Any]:
 			False
 		],
 		# "as_timeseries": [True, False],
-		# "n_steps": [100, 1_000, ],
+		"n_steps": [2, 10, 32, 100, ],
 		"n_hidden_neurons": [
-			16,
-			32,
+			# 16,
+			# 32,
 			# 64,
 			# [64, 64],
-			# 128,
+			128,
 			# [32, 32],
 			# 32
 		],
@@ -86,7 +87,7 @@ def save_params(params: Dict[str, Any], save_path: str):
 	pickle.dump(params, open(save_path, "wb"))
 
 
-def train_with_params(params: Dict[str, Any], data_folder="tr_results", verbose=False):
+def train_with_params(params: Dict[str, Any], data_folder="tr_results", verbose=False, p_bar_leave=None):
 	checkpoints_name = str(hash_params(params))
 	checkpoint_folder = f"{data_folder}/{checkpoints_name}"
 	os.makedirs(checkpoint_folder, exist_ok=True)
@@ -95,7 +96,8 @@ def train_with_params(params: Dict[str, Any], data_folder="tr_results", verbose=
 		dataset_id=params["dataset_id"],
 		batch_size=256,
 		# as_timeseries=params["as_timeseries"],
-		# n_steps=params["n_steps"],
+		n_steps=params["n_steps"],
+		train_val_split_ratio=params.get("train_val_split_ratio", 0.95),
 		to_spikes_use_periods=params["to_spikes_use_periods"],
 		nb_workers=psutil.cpu_count(logical=False),
 	)
@@ -103,7 +105,7 @@ def train_with_params(params: Dict[str, Any], data_folder="tr_results", verbose=
 		inputs_size=28 * 28,
 		output_size=10,
 		n_hidden_neurons=params["n_hidden_neurons"],
-		# int_time_steps=params["n_steps"],
+		int_time_steps=params["n_steps"],
 		spike_func=params["spike_func"],
 		hidden_layer_type=params["hidden_layer_type"],
 		use_recurrent_connection=params["use_recurrent_connection"],
@@ -122,6 +124,8 @@ def train_with_params(params: Dict[str, Any], data_folder="tr_results", verbose=
 		load_checkpoint_mode=LoadCheckpointMode.LAST_EPOCH,
 		force_overwrite=True,
 		verbose=verbose,
+		p_bar_position=1,
+		p_bar_leave=p_bar_leave,
 	)
 	network.load_checkpoint(LoadCheckpointMode.BEST_EPOCH)
 	return dict(
@@ -152,6 +156,7 @@ def train_all_params(training_params: Dict[str, Any] = None, data_folder: str = 
 	:param training_params:
 	:return:
 	"""
+	warnings.filterwarnings("ignore", category=UserWarning)
 	os.makedirs(data_folder, exist_ok=True)
 	results_path = os.path.join(data_folder, "results.csv")
 	if training_params is None:
@@ -166,33 +171,33 @@ def train_all_params(training_params: Dict[str, Any] = None, data_folder: str = 
 	except FileNotFoundError:
 		df = pd.DataFrame(columns=columns)
 
-	p_bar = tqdm.tqdm(all_params_combinaison_dict, desc="Training all the parameters")
-	for params in p_bar:
-		if str(hash_params(params)) in df["checkpoints"].values:
-			continue
-		# p_bar.set_description(f"Training {params}")
-		try:
-			result = train_with_params(params, data_folder=data_folder, verbose=verbose)
-			df = pd.concat([df, pd.DataFrame(
-				dict(
-					checkpoints=[result["checkpoints_name"]],
-					**{k: [v] for k, v in params.items()},
-					train_accuracy=[result["accuracies"]["train"]],
-					val_accuracy=[result["accuracies"]["val"]],
-					test_accuracy=[result["accuracies"]["test"]],
-				))],  ignore_index=True,
-			)
-			df.to_csv(results_path)
-			p_bar.set_postfix(
-				params=params,
-				train_accuracy=result["accuracies"]['train'],
-				val_accuracy=result["accuracies"]['val'],
-				test_accuracy=result["accuracies"]['test']
-			)
-		except Exception as e:
-			logging.error(e)
-			continue
-	p_bar.close()
+	with tqdm.tqdm(all_params_combinaison_dict, desc="Training all the parameters", position=0) as p_bar:
+		for i, params in enumerate(p_bar):
+			if str(hash_params(params)) in df["checkpoints"].values:
+				continue
+			# p_bar.set_description(f"Training {params}")
+			try:
+				leave = i == len(all_params_combinaison_dict) - 1
+				result = train_with_params(params, data_folder=data_folder, verbose=verbose, p_bar_leave=leave)
+				df = pd.concat([df, pd.DataFrame(
+					dict(
+						checkpoints=[result["checkpoints_name"]],
+						**{k: [v] for k, v in params.items()},
+						train_accuracy=[result["accuracies"]["train"]],
+						val_accuracy=[result["accuracies"]["val"]],
+						test_accuracy=[result["accuracies"]["test"]],
+					))],  ignore_index=True,
+				)
+				df.to_csv(results_path)
+				p_bar.set_postfix(
+					params=params,
+					train_accuracy=result["accuracies"]['train'],
+					val_accuracy=result["accuracies"]['val'],
+					test_accuracy=result["accuracies"]['test']
+				)
+			except Exception as e:
+				logging.error(e)
+				continue
 	return df
 
 
